@@ -1,81 +1,75 @@
-async def behandel_page(item, session, page):
+# behandel.py
 
-    from q_haderslev_vbo.automation_server.ats_update_item_data import update_item_data
-    from q_haderslev_vbo.automation_server.ats_find_state import find_state
-    import logging
-    logger = logging.getLogger(__name__)
+import logging
+
+from q_haderslev_vbo.automation_server.ats_update_item_data import update_item_data
+
+from config_reports import get_report_by_id
+from database_workitems_repository import fetch_workitems_for_report
+from reporting_data_mapper import map_rows_to_excel_dicts
+from reporting_excel_builder import create_excel_report
+from reporting_item_builder import reorder_report_box
+from time_helper import (
+    database_window_to_danish_string,
+    now_danish_string,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def send_mail(user_mail, mail):
+    """
+    Fake mail funktion (genbrugelig kodeblok)
+
+    ✅ Denne funktion sender IKKE mail
+    ✅ Den printer hvad der ville blive sendt
+    ✅ Bruges til test uden Outlook
+
+    🔴 TODO:
+    Erstat med rigtig send_mail
+    """
+
+    print("\n================= FAKE MAIL =================")
+    print(f"Fra: {user_mail}")
+    print(f"Til: {mail.get('to')}")
+    print(f"Cc: {mail.get('cc')}")
+    print(f"Bcc: {mail.get('bcc')}")
+    print(f"Emne: {mail.get('subject')}")
+    print(f"Body:\n{mail.get('body')}")
+    print(f"Attachments: {mail.get('attachments')}")
+    print("=============================================\n")
+
+    logger.info("FAKE MAIL sendt (kun print)")
+
+
+async def behandel_item(item):
+    """
+    Behandler ét rapportering item.
+
+    funktion (genbrugelig kodeblok)
+    """
 
     data = item.data
+    box = data.get("box", {})
 
-    """
-    PLAYWRIGHT – NY STANDARD (VIGTIGT):
+    rapport_id = box.get("rapport_id")
 
-    - BrowserSession (objekt – browser-livscyklus) oprettes i main.py
-    - session gives IND i behandel_page som parameter
-    - behandel_page må:
-        ✅ bruge page.goto() (funktion – navigér)
-        ✅ tage screenshots via await session.recorder.screenshot(page=page,"cura_efter_login",always=True)
-        ✅ tage optage video via await session.recorder.start_recording(page=page, 10)
-    - behandel_page må IKKE:
-        ❌ oprette BrowserSession
-        ❌ lukke session eller browser 
-        ❌ bruge session.new_page() (funktion – ny fane) (kan godt være undtagelser)
-        ❌ have try/except/finally for Playwright
-        ❌Exception-håndtering, screenshots ved fejl og session.close() åndteres ALTID i main.py.
-    
-    SHAREPOINT LIST INTEGRATION
-    from q_haderslev_vbo.automation_server.ats_sharepoint import (
-    hent_sharepoint_list_item_til_box,
-    gem_sharepoint_list_item_til_box
-    )
+    if not rapport_id:
+        raise ValueError("rapport_id mangler i item.data['box']")
 
-    # HENT
-    hent_sharepoint_list_item_til_box(
-        site_name="Automatisering",
-        list_name="Test - Rune",
-        list_item_id=item.data["box"]["sharepoint"]["id"],
-        item=item
-    )
+    report = get_report_by_id(rapport_id)
 
-    # GEM (UPDATE)
-    gem_sharepoint_list_item_til_box(
-        site_name="Automatisering",
-        list_name="Test - Rune",
-        sharepoint_data={
-            "id": item.data["box"]["sharepoint"]["id"],
-            "Robot kommentar": "Sag afsluttet"
-        },
-        item=item
-)
-    behandel_page(item, session, page):
-    
-    Eksempel på hvordan sharepoint kan bruges
-  1. Læs data = item.data
-  2. Sørg for at box findes
-  3. (Evt.) hent SharePoint ind i box.sharepoint
-  4. Brug box + box.sharepoint til logik
-  5. Når noget ændres:
-       - opdatér box (lokalt)
-       - gem i SharePoint (via gem_..._til_box)
-  6. Opdatér states/status
-  7. Lad ATS gemme item.data
-    """
+    if not report:
+        raise ValueError(f"Ukendt rapport_id: {rapport_id}")
 
-    # ==========================================================
-    # 🧠 STATES
-    # ==========================================================
     class States:
-        SEND_BREV = "1.0 Brev sendt"
-        JOURNALISER_BREV = "1.5 Brev journaliseret"
-        AFSLUT_SAG = "2.0 Sag afsluttet"
+        HENT_DATA = "1.0 Data hentet"
+        INGEN_ROWS = "1.5 Ingen rows"
+        OPRET_EXCEL = "2.0 Excel oprettet"
+        SEND_MAIL = "3.0 Mail sendt"
 
-
-    # ==========================================================
-    # 🔁 HELPERS
-    # ==========================================================
     def mangler_state(state, step):
         states = data.get("state", [])
-
         match = next((s for s in states if state in s), None)
 
         if match:
@@ -85,58 +79,166 @@ async def behandel_page(item, session, page):
         return True
 
     def set_state(state):
+        data["box"] = reorder_report_box(data.get("box", {}))
         update_item_data(data, item=item, state=state)
 
     def log_step(step, text):
         logger.info(f"[{step}] {text}")
 
-
     # ==========================================================
-    step = "SEND_BREV"
+    # STEP 1: HENT_DATA
     # ==========================================================
+    step = "HENT_DATA"
     state = getattr(States, step)
 
-    if mangler_state(state, step):
+    rows = []
 
+    if mangler_state(state, step):
         log_step(step, "Start")
 
-        data["box"]["brev_sendt_id"] = 123
-        log_step(step, f'ID sat: {data["box"]["brev_sendt_id"]}')
+        data["box"] = reorder_report_box(data.get("box", {}))
+
+        update_item_data(
+            data,
+            item=item,
+            status="Processing",
+            status_code="Henter data",
+        )
+
+        rows = fetch_workitems_for_report(
+            box["kilde_queue"],
+            box["status_filter"],
+            box["time_field"],
+            box["rapportering_start"],
+            box["rapportering_end"],
+        )
+
+        data["box"]["excel_antal_rows"] = len(rows)
+        data["box"] = reorder_report_box(data.get("box", {}))
+
+        log_step(step, f"Rows hentet: {len(rows)}")
 
         update_item_data(data, item=item)
+        set_state(state)
+    else:
+        rows = fetch_workitems_for_report(
+            box["kilde_queue"],
+            box["status_filter"],
+            box["time_field"],
+            box["rapportering_start"],
+            box["rapportering_end"],
+        )
+
+    # ==========================================================
+    # STEP 1.5: INGEN_ROWS
+    # ==========================================================
+    if len(rows) == 0:
+        step = "INGEN_ROWS"
+        state = getattr(States, step)
+
+        if mangler_state(state, step):
+            log_step(step, "Ingen rows - ingen mail")
+
+            data["box"]["mail_sendt"] = False
+            data["box"]["mail_sprunget_over"] = True
+            data["box"]["mail_sprunget_over_aarsag"] = "Ingen rows"
+            data["box"]["afsluttet_tidspunkt"] = now_danish_string()
+            data["box"] = reorder_report_box(data.get("box", {}))
+
+            update_item_data(
+                data,
+                item=item,
+                status="Completed",
+                status_code="Ingen rows",
+            )
+
+            set_state(state)
+
+        return
+
+    # ==========================================================
+    # STEP 2: OPRET_EXCEL
+    # ==========================================================
+    step = "OPRET_EXCEL"
+    state = getattr(States, step)
+
+    excel_file = None
+
+    if mangler_state(state, step):
+        log_step(step, "Start")
+
+        excel_rows = map_rows_to_excel_dicts(rows, report["columns"])
+
+        excel_file = create_excel_report(
+            box["rapport_navn"],
+            report["excel_file_prefix"],
+            excel_rows,
+        )
+
+        data["box"]["excel_fil"] = str(excel_file)
+        data["box"] = reorder_report_box(data.get("box", {}))
+
+        log_step(step, f"Excel oprettet: {excel_file}")
+
+        update_item_data(
+            data,
+            item=item,
+            status="Processing",
+            status_code="Excel oprettet",
+        )
 
         set_state(state)
-
+    else:
+        excel_file = box.get("excel_fil")
 
     # ==========================================================
-    step = "JOURNALISER_BREV"
+    # STEP 3: SEND_MAIL
     # ==========================================================
+    step = "SEND_MAIL"
     state = getattr(States, step)
 
     if mangler_state(state, step):
-
         log_step(step, "Start")
 
-        data["box"]["journal_id"] = 456
-        log_step(step, f'ID sat: {data["box"]["journal_id"]}')
+        mail_config = data["box"].get("mail", {})
 
-        update_item_data(data, item=item)
+        # Mail får dansk visning af rapportperioden,
+        # men item-data beholder de tekniske database-felter.
+        mail_context = dict(data["box"])
+        mail_context["rapportering_start_dk"] = database_window_to_danish_string(
+            data["box"].get("rapportering_start")
+        )
+        mail_context["rapportering_end_dk"] = database_window_to_danish_string(
+            data["box"].get("rapportering_end")
+        )
 
-        set_state(state)
+        mail_subject = report["mail_subject"].format(**mail_context)
+        mail_body = report["mail_body"].format(**mail_context)
 
+        send_mail(
+            user_mail=report["afsender_mail"],
+            mail={
+                "subject": mail_subject,
+                "body": mail_body,
+                "to": mail_config.get("to", []),
+                "cc": mail_config.get("cc", []),
+                "bcc": mail_config.get("bcc", []),
+                "attachments": [str(excel_file)],
+            },
+        )
 
-    # ==========================================================
-    step = "AFSLUT_SAG"
-    # ==========================================================
-    state = getattr(States, step)
+        data["box"]["mail_sendt"] = True
+        data["box"]["mail_sprunget_over"] = False
+        data["box"]["mail_sprunget_over_aarsag"] = None
+        data["box"]["mail_sendt_tidspunkt"] = now_danish_string()
+        data["box"]["afsluttet_tidspunkt"] = now_danish_string()
+        data["box"] = reorder_report_box(data.get("box", {}))
 
-    if mangler_state(state, step):
-
-        log_step(step, "Start")
-
-        data["box"]["afslutnings_id"] = 789
-        log_step(step, f'ID sat: {data["box"]["afslutnings_id"]}')
-
-        update_item_data(data, item=item)
+        update_item_data(
+            data,
+            item=item,
+            status="Completed",
+            status_code="Mail sendt (FAKE)",
+        )
 
         set_state(state)
