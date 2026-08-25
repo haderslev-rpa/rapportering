@@ -13,6 +13,9 @@ from q_haderslev_vbo.automation_server.ats_update_item_data import (
     update_item_data,
 )
 
+from ats_drift_report import (
+    run_ats_drift_report,
+)
 from behandel import behandel_item
 from config_reports import (
     REPORTS,
@@ -47,12 +50,20 @@ from sharepoint_report_config_repository import (
 # ------------------------------------------------------------
 DEBUG = "--debug" in sys.argv
 QUEUE_MODE = "--queue" in sys.argv
+ATS_DRIFT_MODE = "--ats-drift" in sys.argv
 
 # ------------------------------------------------------------
 # LOGGING
-# Debug giver kun ekstra log.
-# Debug ændrer aldrig rapportens beslutningslogik.
 # ------------------------------------------------------------
+#
+# --debug giver kun mere log.
+#
+# --debug ændrer aldrig:
+#     cron
+#     rapporteringsperiode
+#     queue-mode
+#     ATS-driftsrapportens data
+#
 LOG_LEVEL = (
     logging.DEBUG
     if DEBUG
@@ -92,8 +103,8 @@ async def populate_queue(
     """
     Producer mode.
 
-    Kontrollerer rapportopsætninger og opretter
-    rapportering-items, når reglerne tillader det.
+    Kontrollerer de almindelige dynamiske rapporter og
+    opretter rapportering-items, når reglerne tillader det.
 
     Output:
         None.
@@ -429,7 +440,7 @@ async def process_workqueue(
     """
     Consumer mode.
 
-    Behandler eksisterende rapportering-items.
+    Behandler eksisterende almindelige rapportering-items.
 
     Output:
         None.
@@ -532,19 +543,61 @@ async def process_workqueue(
 
 
 if __name__ == "__main__":
-    validate_reports_config()
+    # --------------------------------------------------------
+    # VALIDER KOMBINEREDE MODES
+    # --------------------------------------------------------
+    if ATS_DRIFT_MODE and QUEUE_MODE:
+        raise ValueError(
+            "--ats-drift og --queue må ikke bruges sammen"
+        )
 
     log_info(
         logger,
         (
-            f"PROGRAM START | DEBUG={DEBUG} | "
-            f"QUEUE_MODE={QUEUE_MODE}"
+            f"PROGRAM START | "
+            f"DEBUG={DEBUG} | "
+            f"QUEUE_MODE={QUEUE_MODE} | "
+            f"ATS_DRIFT_MODE={ATS_DRIFT_MODE}"
         ),
     )
 
     ats = AutomationServer.from_environment()
+
+    # --------------------------------------------------------
+    # ATS-DRIFTSRAPPORT
+    # --------------------------------------------------------
+    #
+    # Denne mode bruger ikke rapportering-workqueue.
+    #
+    # Den:
+    #     henter data
+    #     opretter Excel
+    #     sender mail
+    #     afslutter processen
+    #
+    if ATS_DRIFT_MODE:
+        result = run_ats_drift_report()
+
+        log_info(
+            logger,
+            (
+                "ATS DRIFTRAPPORT RESULTAT | "
+                f"{result}"
+            ),
+        )
+
+        sys.exit(0)
+
+    # --------------------------------------------------------
+    # ALMINDELIG RAPPORTERING
+    # --------------------------------------------------------
+    validate_reports_config()
+
     workqueue = ats.workqueue()
 
+    # --------------------------------------------------------
+    # QUEUE-MODE
+    # --------------------------------------------------------
     if QUEUE_MODE:
         asyncio.run(
             populate_queue(
@@ -554,6 +607,9 @@ if __name__ == "__main__":
         )
         sys.exit(0)
 
+    # --------------------------------------------------------
+    # PROCESS-MODE
+    # --------------------------------------------------------
     asyncio.run(
         process_workqueue(
             workqueue,
