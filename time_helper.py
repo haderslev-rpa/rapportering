@@ -5,13 +5,16 @@ from zoneinfo import ZoneInfo
 
 
 DK_ZONE = ZoneInfo("Europe/Copenhagen")
+UTC_ZONE = ZoneInfo("UTC")
 
 
 def now_danish():
     """
-    Returnerer dansk datetime (dato/tid objekt).
+    Returnerer nuværende tidspunkt i dansk tidszone.
 
-    funktion (genbrugelig kodeblok)
+    Output:
+        datetime:
+            Timezone-aware dansk datetime.
     """
 
     return datetime.now(DK_ZONE)
@@ -19,58 +22,69 @@ def now_danish():
 
 def now_danish_string():
     """
-    Returnerer dansk tid som tekst.
+    Returnerer nuværende dansk tid som læsbar tekst.
 
-    funktion (genbrugelig kodeblok)
+    Output:
+        str:
+            Eksempel:
+                25-08-2026 10:41:30
     """
 
-    return now_danish().strftime("%d-%m-%Y %H:%M:%S")
+    return now_danish().strftime(
+        "%d-%m-%Y %H:%M:%S"
+    )
 
 
 def now_danish_filename_string():
     """
-    Returnerer dansk tid til filnavn.
+    Returnerer dansk tid til et sikkert filnavn.
 
-    funktion (genbrugelig kodeblok)
+    Output:
+        str:
+            Eksempel:
+                25-08-2026_10-41-30
     """
 
-    return now_danish().strftime("%d-%m-%Y_%H-%M-%S")
+    return now_danish().strftime(
+        "%d-%m-%Y_%H-%M-%S"
+    )
 
 
 def format_database_window_datetime(value):
     """
-    Formatterer rapporteringsvindue uden dansk konvertering.
+    Formatterer rapporteringsvinduet uden tidszonekonvertering.
 
-    funktion (genbrugelig kodeblok)
+    Bruges kun til:
+        rapportering_start
+        rapportering_end
+
+    Output:
+        str:
+            Den tekniske databaseværdi som tekst.
 
     VIGTIGT:
-    Bruges til rapportering_start og rapportering_end.
-    Disse felter skal være tekniske database-værdier.
+        Funktionen må ikke forskyde tidspunktet til dansk tid.
     """
 
     if value is None:
         return None
-
-    # Bevar timezone/offset hvis den findes
-    if hasattr(value, "isoformat"):
-        return str(value)
 
     return str(value)
 
 
 def parse_database_window_datetime(value):
     """
-    Parser database-vindue fra tekst til datetime (dato/tid objekt).
+    Parser en teknisk databaseværdi til datetime.
 
-    funktion (genbrugelig kodeblok)
+    Output:
+        datetime:
+            Hvis værdien kunne parses.
 
-    Understøtter både:
-    - med offset, fx +00:00
-    - uden offset
-    - gamle tekstformater
+        None:
+            Hvis værdien mangler eller ikke kunne parses.
     """
 
-    if not value:
+    if value is None:
         return None
 
     if isinstance(value, datetime):
@@ -78,21 +92,24 @@ def parse_database_window_datetime(value):
 
     text = str(value).strip()
 
-    # Prøv som ISO først
     try:
-        return datetime.fromisoformat(text)
-    except Exception:
+        return datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+    except ValueError:
         pass
 
-    # Fallback formater
     formats = [
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
     ]
 
-    for fmt in formats:
+    for date_format in formats:
         try:
-            return datetime.strptime(text, fmt)
+            return datetime.strptime(
+                text,
+                date_format,
+            )
         except ValueError:
             pass
 
@@ -101,23 +118,37 @@ def parse_database_window_datetime(value):
 
 def database_window_to_danish_string(value):
     """
-    Konverterer database-vindue til dansk visningstekst.
+    Laver en dansk visning af et teknisk database-tidspunkt.
 
-    funktion (genbrugelig kodeblok)
+    Bruges eksempelvis i mail-brødtekst.
 
-    Bruges til mail-brødtekst eller anden visning.
-    Ændrer IKKE de tekniske felter i item-data.
+    Den tekniske værdi i rapportering_start eller
+    rapportering_end ændres ikke.
+
+    Output:
+        str:
+            Dansk visning:
+                dd-mm-yyyy hh:mm:ss
     """
 
-    dt = parse_database_window_datetime(value)
+    parsed_value = (
+        parse_database_window_datetime(
+            value
+        )
+    )
 
-    if not dt:
+    if parsed_value is None:
         return str(value)
 
-    if dt.tzinfo is None:
-        # Hvis database-værdien er uden timezone,
-        # viser vi den uændret for ikke at gætte forkert.
-        return dt.strftime("%d-%m-%Y %H:%M:%S")
+    if parsed_value.tzinfo is None:
+        # Hvis databaseværdien ikke har tidszone,
+        # bevares klokkeslættet uden at gætte.
+        return parsed_value.strftime(
+            "%d-%m-%Y %H:%M:%S"
+        )
 
-    dk_dt = dt.astimezone(DK_ZONE)
-    return dk_dt.strftime("%d-%m-%Y %H:%M:%S")
+    return (
+        parsed_value
+        .astimezone(DK_ZONE)
+        .strftime("%d-%m-%Y %H:%M:%S")
+    )
