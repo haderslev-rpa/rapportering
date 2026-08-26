@@ -317,7 +317,6 @@ def _build_select_sql(select_fields):
 
     return ",\n        ".join(select_parts)
 
-
 def _build_where_parts(
     kilde_queue,
     status_filter,
@@ -330,26 +329,196 @@ def _build_where_parts(
     """
     Bygger den faste sikre WHERE-del plus rapportens ekstra filter.
 
+    DATABASEENS TIDSMODEL
+    =====================
+
+    Workitem-tabellens tidsfelter er:
+
+        created_at
+        updated_at
+        started_at
+
+    Felterne har PostgreSQL-typen:
+
+        timestamp without time zone
+
+    Værdierne er gemt som dansk lokalt klokkeslæt.
+
+    Eksempel:
+
+        w.updated_at:
+            2026-08-26 11:26:40
+
+    Værdien har ingen tidszoneinformation i selve kolonnen,
+    men klokkeslættet skal forstås som:
+
+        Europe/Copenhagen
+
+    Rapportens tekniske periodefelter er derimod UTC-baserede:
+
+        rapportering_start
+        rapportering_end
+
+    Eksempel:
+
+        rapportering_end:
+            2026-08-26 09:29:13+00:00
+
+    Derfor må databasefeltet ikke sammenlignes direkte med
+    rapporteringsgrænserne.
+
+    Forkert sammenligning:
+
+        w.updated_at <= rapportering_end
+
+    Dette kan sammenligne:
+
+        11:26 <= 09:29
+
+    selv om klokkeslættene i virkeligheden repræsenterer:
+
+        11:26 dansk tid
+        =
+        09:26 UTC
+
+    Korrekt sammenligning:
+
+        (
+            w.updated_at
+            AT TIME ZONE 'Europe/Copenhagen'
+        ) <= rapportering_end
+
+    PostgreSQL fortolker dermed det gemte klokkeslæt som
+    dansk tid og konverterer værdien til et entydigt
+    timestamp with time zone.
+
+    Eksempel:
+
+        Gemte værdi:
+            2026-08-26 11:26:40
+
+        Fortolket som dansk sommertid:
+            2026-08-26 11:26:40+02:00
+
+        Samme tidspunkt i UTC:
+            2026-08-26 09:26:40+00:00
+
+    Denne konvertering håndterer både dansk sommertid
+    og dansk vintertid via tidszonen:
+
+        Europe/Copenhagen
+
+    FAST SIKKER GRUND-QUERY
+    =======================
+
+    Funktionen tilføjer altid disse filtre:
+
+        1. q.name matcher kilde_queue
+
+        2. w.status matcher status_filter
+
+        3. Det valgte time_field ligger efter
+           rapportering_start
+
+        4. Det valgte time_field ligger før eller lig med
+           rapportering_end
+
+    Rapportens extra_where_sql kan kun tilføje flere
+    AND-betingelser.
+
+    VIGTIGT
+    =======
+
+    time_field sættes ind i SQL som et kolonnenavn.
+
+    Derfor valideres feltet først med:
+
+        _validate_time_field()
+
+    De øvrige værdier sendes som psycopg2-parametre og
+    sættes ikke direkte ind med f-strings.
+
+    Input:
+        kilde_queue:
+            Det præcise navn fra workqueue.name.
+
+        status_filter:
+            Den ønskede workitem-status.
+
+            Eksempel:
+                COMPLETED
+
+        time_field:
+            Et af de tilladte tidsfelter:
+
+                created_at
+                updated_at
+                started_at
+
+        rapportering_start:
+            Teknisk starttidspunkt for rapportperioden.
+
+        rapportering_end:
+            Teknisk sluttidspunkt for rapportperioden.
+
+        extra_where_sql:
+            Rapportens ekstra SQL-filter.
+
+            Skal være tom tekst eller begynde med AND.
+
+        sql_parameters:
+            Dictionary med rapportens parameteriserede
+            SQL-værdier.
+
     Output:
         tuple:
+
             (
                 where_sql,
                 query_parameters,
             )
+
+        where_sql:
+            Den komplette WHERE-del.
+
+        query_parameters:
+            Dictionary med både rapportmotorens faste
+            parametre og rapportens egne parametre.
     """
 
-    _validate_time_field(time_field)
+    # ---------------------------------------------------------
+    # VALIDÉR TIDSFELT
+    # ---------------------------------------------------------
+    #
+    # time_field indsættes som kolonnenavn i SQL og skal
+    # derfor være på rapportmotorens faste tilladelsesliste.
+    _validate_time_field(
+        time_field
+    )
 
+    # ---------------------------------------------------------
+    # NORMALISÉR SQL-PARAMETRE
+    # ---------------------------------------------------------
     if sql_parameters is None:
         sql_parameters = {}
 
-    if not isinstance(sql_parameters, dict):
+    if not isinstance(
+        sql_parameters,
+        dict,
+    ):
         raise ValueError(
             "sql_parameters skal være en dict"
         )
 
-    query_parameters = dict(sql_parameters)
+    # Lav en kopi, så rapportens oprindelige dictionary
+    # ikke bliver ændret.
+    query_parameters = dict(
+        sql_parameters
+    )
 
+    # ---------------------------------------------------------
+    # BESKYT RAPPORTMOTORENS INTERNE PARAMETERNAVNE
+    # ---------------------------------------------------------
     reserved_parameter_names = {
         "base_kilde_queue",
         "base_status_filter",
@@ -368,24 +537,60 @@ def _build_where_parts(
             f"{sorted(conflicts)}"
         )
 
+    # ---------------------------------------------------------
+    # TILFØJ RAPPORTMOTORENS FASTE PARAMETRE
+    # ---------------------------------------------------------
     query_parameters.update(
         {
             "base_kilde_queue": kilde_queue,
             "base_status_filter": status_filter,
-            "base_rapportering_start": rapportering_start,
-            "base_rapportering_end": rapportering_end,
+            "base_rapportering_start": (
+                rapportering_start
+            ),
+            "base_rapportering_end": (
+                rapportering_end
+            ),
         }
     )
 
+    # ---------------------------------------------------------
+    # BYG DEN FASTE SIKRE WHERE-DEL
+    # ---------------------------------------------------------
+    #
+    # Workitemets time_field er timestamp without time zone
+    # og indeholder dansk lokalt klokkeslæt.
+    #
+    # AT TIME ZONE 'Europe/Copenhagen' fortolker værdien
+    # som dansk tid og returnerer et entydigt tidspunkt,
+    # som kan sammenlignes korrekt med rapporteringsvinduets
+    # UTC-værdier.
+    #
+    # Dette fungerer automatisk ved både:
+    #
+    #     sommertid, UTC+02:00
+    #     vintertid, UTC+01:00
     where_sql = f"""
     WHERE q.name = %(base_kilde_queue)s
+
       AND w.status = %(base_status_filter)s
-      AND w.{time_field} > %(base_rapportering_start)s
-      AND w.{time_field} <= %(base_rapportering_end)s
+
+      AND (
+            w.{time_field}
+            AT TIME ZONE 'Europe/Copenhagen'
+          ) > %(base_rapportering_start)s
+
+      AND (
+            w.{time_field}
+            AT TIME ZONE 'Europe/Copenhagen'
+          ) <= %(base_rapportering_end)s
     """
 
+    # ---------------------------------------------------------
+    # TILFØJ RAPPORTENS EKSTRA WHERE-FILTER
+    # ---------------------------------------------------------
     cleaned_extra_where_sql = (
-        extra_where_sql or ""
+        extra_where_sql
+        or ""
     ).strip()
 
     if cleaned_extra_where_sql:
@@ -398,8 +603,10 @@ def _build_where_parts(
             + cleaned_extra_where_sql
         )
 
-    return where_sql, query_parameters
-
+    return (
+        where_sql,
+        query_parameters,
+    )
 
 def _validate_time_field(time_field):
     """

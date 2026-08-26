@@ -4,72 +4,56 @@
 RAPPORT: FOREBYGGENDE HJEMMEBESØG
 =================================
 
-Denne rapport finder completed items fra køen:
+Rapporten finder completed items fra køen:
 
     forebyggende-hjemmebesoeg
 
-Rapporten medtager kun items, hvor JSON-arrayet:
-
-    data.state
-
-indeholder mindst én state, som starter med:
-
-    9.0 Sendt til manuel behandling
-    4.2 Intern kontaktperson oprettet
-    3.1 Organisation oprettet
-
-Teksten efter procestrinnet må gerne indeholde dato og tidspunkt.
-
-Eksempel:
-
-    9.0 Sendt til manuel behandling 26-08-2026 10:14:48
-
-Derfor anvendes SQL-mønstre med procenttegn:
-
-    9.0 Sendt til manuel behandling%
-
-Procenttegnet betyder:
-
-    Alt efter den faste tekst accepteres.
-
-VIGTIGT:
-
-    Kun 9.0 med punktum accepteres.
-
-Denne tekst accepteres:
-
-    9.0 Sendt til manuel behandling
-
-Denne tekst accepteres ikke:
-
-    9,0 Sendt til manuel behandling
-
-
-DATABASESTRUKTUR
-================
-
-Den faste rapportmotor arbejder med:
+Rapporten bruger den almindelige rapportmotors sikre grund-query:
 
     FROM workitem w
     JOIN workqueue q
       ON w.workqueue_id = q.id
 
-De faste felter findes som:
+    WHERE q.name = kilde_queue
+      AND w.status = status_filter
+      AND det valgte time_field ligger i rapporteringsperioden
 
-    w.id
-    w.reference
-    w.status
-    w.message
-    w.created_at
-    w.updated_at
-    w.started_at
-    q.name
+Denne rapport tilføjer et ekstra filter på JSON-arrayet:
 
-Det dynamiske itemindhold ligger i:
+    data.state
 
-    w.data
+Et item medtages, hvis state indeholder mindst én tekst,
+som starter med:
 
-Et typisk item kan se sådan ud:
+    9.0 Sendt til manuel behandling
+    4.2 Intern kontaktperson oprettet
+    3.1 Organisation oprettet
+
+Kun 9.0 med punktum accepteres.
+
+Eksempel på state:
+
+    {
+        "state": [
+            "0.5 Borger fundet i Cura 26-08-2026 10:14:48",
+            "1.0 Aldersregel vurderet 26-08-2026 10:14:48",
+            "9.0 Sendt til manuel behandling 26-08-2026 10:14:48"
+        ]
+    }
+
+Procenttegnet i SQL-mønstrene betyder, at teksten gerne må
+fortsætte med dato, klokkeslæt eller anden tekst:
+
+    9.0 Sendt til manuel behandling%
+
+DATA.BOX
+========
+
+Borgerdata ligger under:
+
+    data.box
+
+Eksempel:
 
     {
         "box": {
@@ -77,309 +61,130 @@ Et typisk item kan se sådan ud:
             "navn": "Eksempel",
             "adresse": "Eksempelvej",
             "husnummer": "1",
-            "postnummer": "6100"
-        },
-        "defer": null,
-        "state": [
-            "0.5 Borger fundet i Cura 26-08-2026 10:14:48",
-            "1.0 Aldersregel vurderet 26-08-2026 10:14:48",
-            "9.0 Sendt til manuel behandling 26-08-2026 10:14:48"
-        ],
-        "status": {
-            "status": "Completed",
-            "status_code": "Manuel"
+            "postnr": "6100",
+            "queue_aarsag": "Eksempel",
+            "aldersregel_aarsag": "Eksempel"
         }
     }
 
-
-VIGTIGT OM DATA.BOX
-===================
-
-De almindelige procesdata ligger typisk under:
-
-    data.box
-
-Eksempel:
-
-    data.box.cpr
-
-I PostgreSQL kan feltet hentes sådan:
+JSON-felter udtrækkes i PostgreSQL med:
 
     w.data::jsonb #>> ARRAY[
         'box',
         'cpr'
     ]
 
-I rapportkonfigurationen sendes JSON-stien som en parameter:
+JSON-stien sendes som en sikker psycopg2-parameter:
 
     "cpr_path": [
         "box",
         "cpr",
     ]
 
-SQL-udtrykket bruger parameteren sådan:
+POSTNUMMER
+==========
 
-    w.data::jsonb #>> %(cpr_path)s
+Det aktuelle felt forventes at hedde:
 
+    data.box.postnr
 
-VIGTIGT OM DATA.STATE
-=====================
+Rapporten understøtter samtidig det tidligere feltnavn:
+
+    data.box.postnummer
+
+Postnummer beregnes derfor med:
+
+    COALESCE(
+        data.box.postnr,
+        data.box.postnummer
+    )
+
+Prioriteten er:
+
+    1. box.postnr
+    2. box.postnummer
+    3. tom værdi
+
+Det betyder, at både nye og eventuelle ældre items kan få
+postnummer med i Excel.
+
+DATA.STATE
+==========
 
 State ligger direkte under data:
 
     data.state
 
-State ligger altså ikke inde i box.
-
-I PostgreSQL findes state-arrayet som:
-
-    w.data::jsonb -> 'state'
-
-Et state-array kan eksempelvis se sådan ud:
-
-    [
-        "3.1 Organisation oprettet 26-08-2026 10:12:00",
-        "4.2 Intern kontaktperson oprettet 26-08-2026 10:13:00"
-    ]
-
-
-GENNEMGANG AF STATE
-===================
+State ligger ikke inde i box.
 
 PostgreSQL-funktionen:
 
     jsonb_array_elements_text(...)
 
-udvider JSON-arrayet til én tekstværdi pr. state.
+gennemgår hvert element i state-arrayet som tekst.
 
-Konceptuelt:
-
-    SELECT state_item.state_text
-
-    FROM jsonb_array_elements_text(
-        w.data::jsonb -> 'state'
-    ) AS state_item(state_text)
-
-Et item med tre states bliver dermed kontrolleret som tre
-separate tekstværdier.
-
-Rapportens EXISTS-filter spørger:
-
-    Findes der mindst én relevant state?
-
-Hvis ja:
-
-    Itemet medtages.
-
-Hvis nej:
-
-    Itemet frasorteres.
-
-
-ROBUST HÅNDTERING AF STATE
-==========================
-
-Koden kontrollerer først, om data.state er et JSON-array:
-
-    jsonb_typeof(
-        w.data::jsonb -> 'state'
-    ) = 'array'
-
-Hvis state mangler, er null eller har en anden datatype,
-bruges et tomt array:
+Hvis state mangler, er null eller ikke er et JSON-array,
+behandles state som:
 
     []::jsonb
 
-Det betyder:
+Itemet giver derfor ikke SQL-fejl.
+Itemet matcher blot ingen relevante states.
 
-    SQL-queryen fejler ikke.
+BESKED
+======
 
-    Itemet matcher blot ingen relevante states.
+Excel-kolonnen Besked beregnes sådan:
 
+1. Hvis state indeholder:
 
-KATEGORISERING
-==============
+       9.0 Sendt til manuel behandling
 
-Rapporten opretter et afledt SQL-felt med navnet:
+   bliver:
 
-    besked
+       Besked = w.message
 
-Feltet kan få én af disse værdier:
+2. Hvis state indeholder både:
 
-    Sendt til manuel behandling
+       4.2 Intern kontaktperson oprettet
 
-    Intern kontaktperson oprettet og Organisation oprettet
+   og:
 
-    Intern kontaktperson oprettet
+       3.1 Organisation oprettet
 
-    Organisation oprettet
+   bliver:
 
-Excel viser værdien i kolonnen:
+       Besked =
+       Intern kontaktperson oprettet og Organisation oprettet
 
-    Besked
+3. Hvis state kun indeholder 4.2:
 
+       Besked = Intern kontaktperson oprettet
 
-KATEGORISERINGENS PRIORITET
-==========================
+4. Hvis state kun indeholder 3.1:
 
-Et item kan indeholde mere end én relevant state.
+       Besked = Organisation oprettet
 
-Kategoriseringen bruger denne prioritet:
+Hvis 9.0 findes sammen med 4.2 eller 3.1, har 9.0 højeste
+prioritet. Besked bliver derfor w.message.
 
-1. Sendt til manuel behandling
+MESSAGE
+=======
 
-2. Både intern kontaktperson og organisation oprettet
+Excel-kolonnen Message indeholder altid det oprindelige:
 
-3. Kun intern kontaktperson oprettet
+    w.message
 
-4. Kun organisation oprettet
+Ved manuel behandling vil Besked og Message derfor have
+samme værdi.
 
+Ved de øvrige kategorier indeholder:
 
-EKSEMPEL 1
-==========
+    Besked:
+        Den afledte proceskategori.
 
-State:
-
-    [
-        "9.0 Sendt til manuel behandling 26-08-2026 10:14:48"
-    ]
-
-Besked:
-
-    Sendt til manuel behandling
-
-
-EKSEMPEL 2
-==========
-
-State:
-
-    [
-        "4.2 Intern kontaktperson oprettet 26-08-2026 10:14:48"
-    ]
-
-Besked:
-
-    Intern kontaktperson oprettet
-
-
-EKSEMPEL 3
-==========
-
-State:
-
-    [
-        "3.1 Organisation oprettet 26-08-2026 10:14:48"
-    ]
-
-Besked:
-
-    Organisation oprettet
-
-
-EKSEMPEL 4
-==========
-
-State:
-
-    [
-        "3.1 Organisation oprettet 26-08-2026 10:13:00",
-        "4.2 Intern kontaktperson oprettet 26-08-2026 10:14:48"
-    ]
-
-Besked:
-
-    Intern kontaktperson oprettet og Organisation oprettet
-
-
-EKSEMPEL 5
-==========
-
-State:
-
-    [
-        "3.1 Organisation oprettet 26-08-2026 10:12:00",
-        "4.2 Intern kontaktperson oprettet 26-08-2026 10:13:00",
-        "9.0 Sendt til manuel behandling 26-08-2026 10:14:48"
-    ]
-
-Besked:
-
-    Sendt til manuel behandling
-
-Det skyldes, at manuel behandling har højeste prioritet.
-
-
-FILTERET
-========
-
-Den faste rapportmotor tilføjer altid:
-
-    q.name = kilde_queue
-
-    w.status = status_filter
-
-    w.updated_at > rapportering_start
-
-    w.updated_at <= rapportering_end
-
-Denne rapport tilføjer derefter:
-
-    data.state skal indeholde mindst ét relevant procestrin.
-
-Statusfilteret er:
-
-    COMPLETED
-
-Rapporten medtager derfor kun completed items inden for det
-tekniske rapporteringsvindue.
-
-
-SELECT_FIELDS
-=============
-
-select_fields udtrækker:
-
-    værdier fra data.box
-
-    den beregnede kategori Besked
-
-Eksempel på et JSON-felt:
-
-    {
-        "name": "cpr",
-        "sql": (
-            "w.data::jsonb "
-            "#>> %(cpr_path)s"
-        ),
-    }
-
-Efter SQL-queryen findes værdien som:
-
-    row["cpr"]
-
-Excel-kolonnen bruger:
-
-    {
-        "header": "CPR",
-        "source": "cpr",
-        "type": "text",
-    }
-
-Det beregnede felt Besked oprettes med SQL CASE.
-
-Efter SQL-queryen findes værdien som:
-
-    row["besked"]
-
-Excel-kolonnen bruger:
-
-    {
-        "header": "Besked",
-        "source": "besked",
-        "type": "text",
-    }
-
+    Message:
+        Den oprindelige værdi fra workitem.message.
 
 EXCEL-DATOER
 ============
@@ -388,7 +193,7 @@ Kolonner med:
 
     "type": "datetime"
 
-bevares som rigtige Excel-datoer og vises sådan:
+bevares som rigtige Excel-datoer og vises som:
 
     dd-mm-yyyy hh:mm:ss
 """
@@ -399,10 +204,9 @@ REPORT = {
     # IDENTITET
     # ---------------------------------------------------------
 
-    # Skal matche SharePoint-kolonnen "Title" præcist.
+    # Skal matche SharePoint-kolonnen Title præcist.
     "rapport_id": "forebyggende-hjemmebesoeg",
 
-    # Det pæne navn, som mailmodtageren ser.
     "rapport_navn": (
         "Forebyggende hjemmebesøg - processtatus"
     ),
@@ -414,7 +218,7 @@ REPORT = {
     # Skal matche workqueue.name præcist.
     "kilde_queue": "forebyggende-hjemmebesoeg",
 
-    # Kun completed items skal med.
+    # Kun completed items medtages.
     "status_filter": "COMPLETED",
 
     # Rapportperioden anvendes på updated_at.
@@ -429,26 +233,9 @@ REPORT = {
     # ---------------------------------------------------------
 
     # Medtag kun items, hvor data.state indeholder mindst én
-    # af de tre relevante states:
-    #
-    #     9.0 Sendt til manuel behandling
-    #
-    #     4.2 Intern kontaktperson oprettet
-    #
-    #     3.1 Organisation oprettet
+    # af de tre relevante states.
     #
     # Kun 9.0 med punktum understøttes.
-    #
-    # jsonb_array_elements_text gennemgår alle tekster
-    # i data.state.
-    #
-    # Hvis state mangler eller ikke er et JSON-array,
-    # behandles state som et tomt array.
-    #
-    # ILIKE gør søgningen uafhængig af store og små bogstaver.
-    #
-    # ANY sammenligner state-teksten med alle mønstrene
-    # i relevant_state_patterns.
     "extra_where_sql": """
         AND EXISTS (
             SELECT 1
@@ -473,17 +260,9 @@ REPORT = {
     # PARAMETRE TIL SQL
     # ---------------------------------------------------------
 
-    # Alle dynamiske SQL-værdier ligger her.
-    #
-    # Procenttegnet % betyder:
-    #
-    #     Accepter al tekst efter det faste procestrin.
-    #
-    # Det betyder, at dato og klokkeslæt efter procestrinnet
-    # ikke skal være kendt på forhånd.
     "sql_parameters": {
         # -----------------------------------------------------
-        # ALLE RELEVANTE STATES
+        # RELEVANTE STATES
         # -----------------------------------------------------
         "relevant_state_patterns": [
             "9.0 Sendt til manuel behandling%",
@@ -491,26 +270,14 @@ REPORT = {
             "3.1 Organisation oprettet%",
         ],
 
-        # -----------------------------------------------------
-        # KATEGORI: SENDT TIL MANUEL BEHANDLING
-        # -----------------------------------------------------
-
-        # VIGTIGT:
-        # Kun 9.0 med punktum.
         "sendt_til_manuel_pattern": (
             "9.0 Sendt til manuel behandling%"
         ),
 
-        # -----------------------------------------------------
-        # KATEGORI: INTERN KONTAKTPERSON
-        # -----------------------------------------------------
         "intern_kontaktperson_pattern": (
             "4.2 Intern kontaktperson oprettet%"
         ),
 
-        # -----------------------------------------------------
-        # KATEGORI: ORGANISATION
-        # -----------------------------------------------------
         "organisation_oprettet_pattern": (
             "3.1 Organisation oprettet%"
         ),
@@ -538,6 +305,13 @@ REPORT = {
             "husnummer",
         ],
 
+        # Aktuelt feltnavn.
+        "postnr_path": [
+            "box",
+            "postnr",
+        ],
+
+        # Fallback til eventuelle ældre items.
         "postnummer_path": [
             "box",
             "postnummer",
@@ -547,18 +321,13 @@ REPORT = {
             "box",
             "queue_aarsag",
         ],
-
-        "aldersregel_aarsag_path": [
-            "box",
-            "aldersregel_aarsag",
-        ],
     },
 
     # ---------------------------------------------------------
     # EKSTRA SELECT-FELTER
     # ---------------------------------------------------------
 
-    # Standardfelterne vælges automatisk af rapportmotoren:
+    # Rapportmotoren vælger automatisk:
     #
     #     id
     #     reference
@@ -570,27 +339,105 @@ REPORT = {
     #     queue_name
     #     data
     #
-    # Her tilføjes rapportens beregnede kategori og
-    # de relevante værdier fra data.box.
+    # Her tilføjes de ønskede JSON-felter og den
+    # beregnede Besked.
     "select_fields": [
+        # -----------------------------------------------------
+        # CPR
+        # -----------------------------------------------------
+        {
+            "name": "cpr",
+            "sql": (
+                "w.data::jsonb "
+                "#>> %(cpr_path)s"
+            ),
+        },
+
+        # -----------------------------------------------------
+        # NAVN
+        # -----------------------------------------------------
+        {
+            "name": "navn",
+            "sql": (
+                "w.data::jsonb "
+                "#>> %(navn_path)s"
+            ),
+        },
+
+        # -----------------------------------------------------
+        # ADRESSE
+        # -----------------------------------------------------
+        {
+            "name": "adresse",
+            "sql": (
+                "w.data::jsonb "
+                "#>> %(adresse_path)s"
+            ),
+        },
+
+        # -----------------------------------------------------
+        # HUSNUMMER
+        # -----------------------------------------------------
+        {
+            "name": "husnummer",
+            "sql": (
+                "w.data::jsonb "
+                "#>> %(husnummer_path)s"
+            ),
+        },
+
+        # -----------------------------------------------------
+        # POSTNUMMER
+        # -----------------------------------------------------
+        {
+            "name": "postnummer",
+
+            # Først bruges box.postnr.
+            #
+            # Hvis box.postnr mangler eller er null,
+            # bruges box.postnummer som fallback.
+            "sql": """
+                COALESCE(
+                    w.data::jsonb
+                    #>> %(postnr_path)s,
+
+                    w.data::jsonb
+                    #>> %(postnummer_path)s
+                )
+            """,
+        },
+
+        # -----------------------------------------------------
+        # QUEUE-ÅRSAG
+        # -----------------------------------------------------
+        {
+            "name": "queue_aarsag",
+            "sql": (
+                "w.data::jsonb "
+                "#>> %(queue_aarsag_path)s"
+            ),
+        },
+
+
         # -----------------------------------------------------
         # AFLEDT KATEGORI: BESKED
         # -----------------------------------------------------
         {
             "name": "besked",
 
-            # Kategoriseringen bruger denne prioritet:
+            # Prioritet:
             #
-            # 1. Sendt til manuel behandling
+            # 1. Manuel behandling:
+            #       Besked = w.message
             #
-            # 2. Både intern kontaktperson og organisation
-            #    oprettet
+            # 2. Både kontaktperson og organisation:
+            #       Besked = begge kategorier
             #
-            # 3. Kun intern kontaktperson oprettet
+            # 3. Kun kontaktperson:
+            #       Besked = kontaktpersonkategorien
             #
-            # 4. Kun organisation oprettet
-            #
-            # CASE stopper ved det første match.
+            # 4. Kun organisation:
+            #       Besked = organisationskategorien
             "sql": """
                 CASE
                     -- =========================================
@@ -614,7 +461,10 @@ REPORT = {
                               ILIKE
                               %(sendt_til_manuel_pattern)s
                     )
-                    THEN 'Sendt til manuel behandling'
+
+                    -- Ved manuel behandling bruges det
+                    -- oprindelige message-felt som Besked.
+                    THEN w.message
 
                     -- =========================================
                     -- 2. BÅDE INTERN KONTAKTPERSON
@@ -687,6 +537,7 @@ REPORT = {
                               ILIKE
                               %(intern_kontaktperson_pattern)s
                     )
+
                     THEN 'Intern kontaktperson oprettet'
 
                     -- =========================================
@@ -710,88 +561,12 @@ REPORT = {
                               ILIKE
                               %(organisation_oprettet_pattern)s
                     )
+
                     THEN 'Organisation oprettet'
 
                     ELSE NULL
                 END
             """,
-        },
-
-        # -----------------------------------------------------
-        # CPR FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "cpr",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(cpr_path)s"
-            ),
-        },
-
-        # -----------------------------------------------------
-        # NAVN FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "navn",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(navn_path)s"
-            ),
-        },
-
-        # -----------------------------------------------------
-        # ADRESSE FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "adresse",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(adresse_path)s"
-            ),
-        },
-
-        # -----------------------------------------------------
-        # HUSNUMMER FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "husnummer",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(husnummer_path)s"
-            ),
-        },
-
-        # -----------------------------------------------------
-        # POSTNUMMER FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "postnummer",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(postnummer_path)s"
-            ),
-        },
-
-        # -----------------------------------------------------
-        # QUEUE-ÅRSAG FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "queue_aarsag",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(queue_aarsag_path)s"
-            ),
-        },
-
-        # -----------------------------------------------------
-        # ALDERSREGEL-ÅRSAG FRA DATA.BOX
-        # -----------------------------------------------------
-        {
-            "name": "aldersregel_aarsag",
-            "sql": (
-                "w.data::jsonb "
-                "#>> %(aldersregel_aarsag_path)s"
-            ),
         },
     ],
 
@@ -824,79 +599,20 @@ REPORT = {
         "Forebyggende_hjemmebesoeg_processtatus"
     ),
 
-    # Kolonnerne står i den rækkefølge, de skal vises i Excel.
+    # Kolonnerne står her i præcis den rækkefølge,
+    # de skal vises i Excel.
+    # ---------------------------------------------------------
+    # EXCEL-KOLONNER
+    # ---------------------------------------------------------
     #
-    # source refererer enten til:
+    # Kolonnerne står i præcis den rækkefølge,
+    # de skal vises i Excel.
     #
-    # 1. Et standardfelt fra rapportmotoren.
+    # States (handlinger) bruger fortsat det interne
+    # SQL-felt med navnet "besked".
     #
-    # 2. name fra select_fields ovenfor.
-    #
-    # Besked indeholder én af:
-    #
-    #     Sendt til manuel behandling
-    #
-    #     Intern kontaktperson oprettet og
-    #     Organisation oprettet
-    #
-    #     Intern kontaktperson oprettet
-    #
-    #     Organisation oprettet
+    # Det er kun Excel-overskriften, der er ændret.
     "columns": [
-        {
-            "header": "Id",
-            "source": "id",
-            "type": "integer",
-        },
-
-        {
-            "header": "Reference",
-            "source": "reference",
-            "type": "text",
-        },
-
-        {
-            "header": "Besked",
-            "source": "besked",
-            "type": "text",
-        },
-
-        {
-            "header": "Status",
-            "source": "status",
-            "type": "text",
-        },
-
-        {
-            "header": "Message",
-            "source": "message",
-            "type": "text",
-        },
-
-        {
-            "header": "Oprettet",
-            "source": "created_at",
-            "type": "datetime",
-        },
-
-        {
-            "header": "Opdateret",
-            "source": "updated_at",
-            "type": "datetime",
-        },
-
-        {
-            "header": "Startet",
-            "source": "started_at",
-            "type": "datetime",
-        },
-
-        {
-            "header": "Queue",
-            "source": "queue_name",
-            "type": "text",
-        },
-
         {
             "header": "CPR",
             "source": "cpr",
@@ -934,8 +650,56 @@ REPORT = {
         },
 
         {
-            "header": "Aldersregel årsag",
-            "source": "aldersregel_aarsag",
+            "header": "States (handlinger)",
+            "source": "besked",
+            "type": "text",
+        },
+
+        {
+            "header": "Message",
+            "source": "message",
+            "type": "text",
+        },
+
+        {
+            "header": "Id",
+            "source": "id",
+            "type": "integer",
+        },
+
+        {
+            "header": "Reference",
+            "source": "reference",
+            "type": "text",
+        },
+
+        {
+            "header": "Status",
+            "source": "status",
+            "type": "text",
+        },
+
+        {
+            "header": "Oprettet",
+            "source": "created_at",
+            "type": "datetime",
+        },
+
+        {
+            "header": "Opdateret",
+            "source": "updated_at",
+            "type": "datetime",
+        },
+
+        {
+            "header": "Startet",
+            "source": "started_at",
+            "type": "datetime",
+        },
+
+        {
+            "header": "Queue",
+            "source": "queue_name",
             "type": "text",
         },
     ],
