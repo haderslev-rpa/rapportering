@@ -158,19 +158,68 @@ def fetch_session_counts(report_now):
     """
     Henter sessiontal pr. process_id.
 
-    Sessions tælles på session.updated_at.
+    Sessions vises i ATS-driftsrapporten som:
 
-    Session-status er en PostgreSQL enum.
-    Derfor konverteres status til tekst med:
+        completed/total
 
-        s.status::text
+    Eksempel:
 
-    før værdien normaliseres og sammenlignes.
+        4/5
 
-    For hvert tidsvindue returneres:
+    Det betyder:
 
-        completed
-        total
+        4 completed sessions
+        5 sessions i alt
+
+    En session med fejl tæller derfor:
+
+        ikke med i completed
+        med i total
+
+    TIDSMODEL
+    =========
+
+    session.updated_at er gemt som dansk lokalt klokkeslæt
+    uden tidszoneinformation.
+
+    Eksempel:
+
+        2026-09-01 06:25:00
+
+    Værdien skal forstås som:
+
+        06:25 dansk tid
+
+    report_now kommer fra:
+
+        clock_timestamp()
+
+    og er et entydigt timestamp with time zone.
+
+    Eksempel om sommeren:
+
+        Rapport køres 07:00 dansk tid
+        report_now = 05:00 UTC
+
+        Session opdateret 06:25 dansk tid
+        updated_at_utc = 04:25 UTC
+
+        04:25 UTC <= 05:00 UTC
+
+    Sessionen kommer derfor korrekt med.
+
+    SQL konverterer session.updated_at sådan:
+
+        s.updated_at
+        AT TIME ZONE 'Europe/Copenhagen'
+
+    Dette håndterer automatisk:
+
+        dansk sommertid
+        dansk vintertid
+
+    TIDSVINDUER
+    ===========
 
     Tidsvinduerne er kumulative:
 
@@ -182,6 +231,18 @@ def fetch_session_counts(report_now):
         30 dage
         40 dage
 
+    En session fra de seneste 12 timer tæller derfor også med
+    i alle de længere vinduer.
+
+    Input:
+        report_now:
+            Ét fælles tidszonebevidst referenceøjeblik fra
+            PostgreSQL.
+
+            Værdien kommer fra:
+
+                SELECT clock_timestamp();
+
     Output:
         dict:
 
@@ -191,7 +252,16 @@ def fetch_session_counts(report_now):
                 "total_24h": 5,
                 "completed_48h": 8,
                 "total_48h": 10,
-                ...
+                "completed_72h": 10,
+                "total_72h": 13,
+                "completed_7d": 20,
+                "total_7d": 24,
+                "completed_14d": 40,
+                "total_14d": 45,
+                "completed_30d": 80,
+                "total_30d": 90,
+                "completed_40d": 100,
+                "total_40d": 112,
             }
         }
     """
@@ -205,8 +275,27 @@ def fetch_session_counts(report_now):
             WITH normalized_sessions AS (
                 SELECT
                     s.process_id,
-                    s.updated_at,
 
+                    -- -----------------------------------------
+                    -- DANSK LOKALTID TIL ENTYDIGT TIDSPUNKT
+                    -- -----------------------------------------
+                    --
+                    -- s.updated_at er timestamp without time zone
+                    -- og indeholder dansk lokalt klokkeslæt.
+                    --
+                    -- Resultatet bliver timestamp with time zone,
+                    -- som kan sammenlignes korrekt med report_now.
+                    (
+                        s.updated_at
+                        AT TIME ZONE 'Europe/Copenhagen'
+                    ) AS updated_at_utc,
+
+                    -- -----------------------------------------
+                    -- NORMALISER SESSIONSTATUS
+                    -- -----------------------------------------
+                    --
+                    -- status er en PostgreSQL enum.
+                    -- Derfor konverteres den først til tekst.
                     UPPER(
                         REPLACE(
                             REPLACE(
@@ -224,84 +313,163 @@ def fetch_session_counts(report_now):
 
                 FROM "session" s
 
-                WHERE s.updated_at > %(report_now)s
+                WHERE
+                    -- Begræns datamængden til rapportens
+                    -- maksimale historik på 40 dage.
+                    (
+                        s.updated_at
+                        AT TIME ZONE 'Europe/Copenhagen'
+                    ) > (
+                        %(report_now)s
                         - INTERVAL '40 days'
-                  AND s.updated_at <= %(report_now)s
-                  AND COALESCE(
+                    )
+
+                    AND (
+                        s.updated_at
+                        AT TIME ZONE 'Europe/Copenhagen'
+                    ) <= %(report_now)s
+
+                    AND COALESCE(
                         s.deleted,
                         FALSE
-                      ) = FALSE
+                    ) = FALSE
             )
 
             SELECT
                 process_id,
 
+                -- =============================================
+                -- SENESTE 24 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '24 hours'
-                      AND normalized_status = 'COMPLETED'
+                        )
+
+                        AND normalized_status = 'COMPLETED'
                 ) AS completed_24h,
 
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '24 hours'
+                        )
                 ) AS total_24h,
 
+                -- =============================================
+                -- SENESTE 48 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '48 hours'
-                      AND normalized_status = 'COMPLETED'
+                        )
+
+                        AND normalized_status = 'COMPLETED'
                 ) AS completed_48h,
 
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '48 hours'
+                        )
                 ) AS total_48h,
 
+                -- =============================================
+                -- SENESTE 72 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '72 hours'
-                      AND normalized_status = 'COMPLETED'
+                        )
+
+                        AND normalized_status = 'COMPLETED'
                 ) AS completed_72h,
 
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '72 hours'
+                        )
                 ) AS total_72h,
 
+                -- =============================================
+                -- SENESTE 7 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '7 days'
-                      AND normalized_status = 'COMPLETED'
+                        )
+
+                        AND normalized_status = 'COMPLETED'
                 ) AS completed_7d,
 
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '7 days'
+                        )
                 ) AS total_7d,
 
+                -- =============================================
+                -- SENESTE 14 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '14 days'
-                      AND normalized_status = 'COMPLETED'
+                        )
+
+                        AND normalized_status = 'COMPLETED'
                 ) AS completed_14d,
 
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '14 days'
+                        )
                 ) AS total_14d,
 
+                -- =============================================
+                -- SENESTE 30 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '30 days'
-                      AND normalized_status = 'COMPLETED'
+                        )
+
+                        AND normalized_status = 'COMPLETED'
                 ) AS completed_30d,
 
                 COUNT(*) FILTER (
-                    WHERE updated_at > %(report_now)s
+                    WHERE
+                        updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '30 days'
+                        )
                 ) AS total_30d,
 
+                -- =============================================
+                -- SENESTE 40 DAGE
+                -- =============================================
+                --
+                -- CTE'en indeholder allerede kun de seneste
+                -- 40 dage. Derfor kræves intet ekstra datofilter.
                 COUNT(*) FILTER (
                     WHERE normalized_status = 'COMPLETED'
                 ) AS completed_40d,
@@ -349,14 +517,38 @@ def fetch_workitem_counts(report_now):
     """
     Henter workitem-tal pr. workqueue_id.
 
-    Workitems tælles på workitem.updated_at.
+    Workitems tælles på:
 
-    Workitem-status kan være en PostgreSQL enum.
-    Derfor konverteres status til tekst med:
+        workitem.updated_at
 
-        w.status::text
+    TIDSMODEL
+    =========
 
-    før værdien normaliseres og sammenlignes.
+    workitem.updated_at har PostgreSQL-typen:
+
+        timestamp without time zone
+
+    Værdierne er gemt som dansk lokalt klokkeslæt.
+
+    Eksempel:
+
+        2026-09-01 06:25:00
+
+    SQL skal derfor fortolke feltet som dansk tid:
+
+        w.updated_at
+        AT TIME ZONE 'Europe/Copenhagen'
+
+    Resultatet bliver et entydigt timestamp with time zone,
+    som kan sammenlignes korrekt med report_now.
+
+    Konverteringen håndterer automatisk både:
+
+        dansk sommertid
+        dansk vintertid
+
+    STATUSSER
+    =========
 
     Completed og failed tælles for:
 
@@ -372,8 +564,32 @@ def fetch_workitem_counts(report_now):
 
         40 dage
 
-    Hvis flere processer bruger samme workqueue_id,
-    får processerne de samme workitem-tal.
+    Status normaliseres, så eksempelvis:
+
+        IN PROGRESS
+        IN-PROGRESS
+        IN_PROGRESS
+
+    alle bliver:
+
+        IN_PROGRESS
+
+    DELTE WORKQUEUES
+    =================
+
+    Workitems er forbundet med workqueue_id og ikke direkte
+    med process_id.
+
+    Hvis flere processer bruger samme workqueue_id, får
+    processerne derfor de samme workitem-tal.
+
+    Sessionstallene er stadig særskilte, fordi sessions er
+    forbundet direkte med process_id.
+
+    Input:
+        report_now:
+            Ét fælles tidszonebevidst referenceøjeblik fra
+            PostgreSQL.
 
     Output:
         dict:
@@ -381,12 +597,24 @@ def fetch_workitem_counts(report_now):
         {
             workqueue_id: {
                 "completed_24h": 5,
-                "completed_40d": 100,
+                "completed_48h": 10,
+                "completed_72h": 15,
+                "completed_7d": 30,
+                "completed_14d": 60,
+                "completed_30d": 100,
+                "completed_40d": 125,
+
                 "failed_24h": 1,
-                "failed_40d": 4,
+                "failed_48h": 2,
+                "failed_72h": 2,
+                "failed_7d": 4,
+                "failed_14d": 5,
+                "failed_30d": 8,
+                "failed_40d": 10,
+
                 "in_progress_40d": 2,
                 "new_40d": 3,
-                "pending_user_40d": 1
+                "pending_user_40d": 1,
             }
         }
     """
@@ -400,8 +628,24 @@ def fetch_workitem_counts(report_now):
             WITH normalized_workitems AS (
                 SELECT
                     w.workqueue_id,
-                    w.updated_at,
 
+                    -- -----------------------------------------
+                    -- DANSK LOKALTID TIL ENTYDIGT TIDSPUNKT
+                    -- -----------------------------------------
+                    --
+                    -- w.updated_at er timestamp without time zone
+                    -- og indeholder dansk lokalt klokkeslæt.
+                    (
+                        w.updated_at
+                        AT TIME ZONE 'Europe/Copenhagen'
+                    ) AS updated_at_utc,
+
+                    -- -----------------------------------------
+                    -- NORMALISER WORKITEMSTATUS
+                    -- -----------------------------------------
+                    --
+                    -- status kan være en PostgreSQL enum.
+                    -- Derfor konverteres den først til tekst.
                     UPPER(
                         REPLACE(
                             REPLACE(
@@ -419,94 +663,200 @@ def fetch_workitem_counts(report_now):
 
                 FROM workitem w
 
-                WHERE w.updated_at > %(report_now)s
+                WHERE
+                    -- Begræns CTE'en til de seneste 40 dage.
+                    (
+                        w.updated_at
+                        AT TIME ZONE 'Europe/Copenhagen'
+                    ) > (
+                        %(report_now)s
                         - INTERVAL '40 days'
-                  AND w.updated_at <= %(report_now)s
+                    )
+
+                    AND (
+                        w.updated_at
+                        AT TIME ZONE 'Europe/Copenhagen'
+                    ) <= %(report_now)s
             )
 
             SELECT
                 workqueue_id,
 
+                -- =============================================
+                -- COMPLETED, 24 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'COMPLETED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'COMPLETED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '24 hours'
+                        )
                 ) AS completed_24h,
 
+                -- =============================================
+                -- COMPLETED, 48 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'COMPLETED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'COMPLETED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '48 hours'
+                        )
                 ) AS completed_48h,
 
+                -- =============================================
+                -- COMPLETED, 72 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'COMPLETED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'COMPLETED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '72 hours'
+                        )
                 ) AS completed_72h,
 
+                -- =============================================
+                -- COMPLETED, 7 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'COMPLETED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'COMPLETED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '7 days'
+                        )
                 ) AS completed_7d,
 
+                -- =============================================
+                -- COMPLETED, 14 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'COMPLETED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'COMPLETED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '14 days'
+                        )
                 ) AS completed_14d,
 
+                -- =============================================
+                -- COMPLETED, 30 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'COMPLETED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'COMPLETED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '30 days'
+                        )
                 ) AS completed_30d,
 
+                -- =============================================
+                -- COMPLETED, 40 DAGE
+                -- =============================================
+                --
+                -- CTE'en indeholder allerede kun 40 dage.
                 COUNT(*) FILTER (
                     WHERE normalized_status = 'COMPLETED'
                 ) AS completed_40d,
 
+                -- =============================================
+                -- FAILED, 24 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'FAILED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'FAILED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '24 hours'
+                        )
                 ) AS failed_24h,
 
+                -- =============================================
+                -- FAILED, 48 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'FAILED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'FAILED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '48 hours'
+                        )
                 ) AS failed_48h,
 
+                -- =============================================
+                -- FAILED, 72 TIMER
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'FAILED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'FAILED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '72 hours'
+                        )
                 ) AS failed_72h,
 
+                -- =============================================
+                -- FAILED, 7 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'FAILED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'FAILED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '7 days'
+                        )
                 ) AS failed_7d,
 
+                -- =============================================
+                -- FAILED, 14 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'FAILED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'FAILED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '14 days'
+                        )
                 ) AS failed_14d,
 
+                -- =============================================
+                -- FAILED, 30 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
-                    WHERE normalized_status = 'FAILED'
-                      AND updated_at > %(report_now)s
+                    WHERE
+                        normalized_status = 'FAILED'
+
+                        AND updated_at_utc > (
+                            %(report_now)s
                             - INTERVAL '30 days'
+                        )
                 ) AS failed_30d,
 
+                -- =============================================
+                -- FAILED, 40 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
                     WHERE normalized_status = 'FAILED'
                 ) AS failed_40d,
 
+                -- =============================================
+                -- IN PROGRESS, 40 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
                     WHERE normalized_status IN (
                         'IN_PROGRESS',
@@ -515,10 +865,16 @@ def fetch_workitem_counts(report_now):
                     )
                 ) AS in_progress_40d,
 
+                -- =============================================
+                -- NEW, 40 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
                     WHERE normalized_status = 'NEW'
                 ) AS new_40d,
 
+                -- =============================================
+                -- PENDING USER, 40 DAGE
+                -- =============================================
                 COUNT(*) FILTER (
                     WHERE normalized_status IN (
                         'PENDING_USER',
