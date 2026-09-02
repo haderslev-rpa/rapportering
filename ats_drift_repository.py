@@ -158,65 +158,113 @@ def fetch_session_counts(report_now):
     """
     Henter sessiontal pr. process_id.
 
-    Sessions vises i ATS-driftsrapporten som:
+    VISNING I EXCEL
+    ================
+
+    Sessions vises som:
 
         completed/total
 
+    total betyder i denne rapport:
+
+        completed + failed
+
+    Andre sessionstatusser tæller ikke med.
+
     Eksempel:
 
-        4/5
+        2 COMPLETED
+        1 FAILED
+        1 anden sessionstatus
 
-    Det betyder:
+    Excel viser:
 
-        4 completed sessions
-        5 sessions i alt
+        2/3
 
-    En session med fejl tæller derfor:
+    Den anden sessionstatus medregnes ikke.
 
-        ikke med i completed
-        med i total
+    Dermed kan antal failed altid beregnes sådan:
+
+        total - completed = failed
+
+    Eksempel:
+
+        2/3
+
+        3 - 2 = 1 failed session
+
+
+    SESSIONSTATUSSER
+    =================
+
+    Følgende status tæller i completed:
+
+        COMPLETED
+
+    Følgende status tæller i total, men ikke i completed:
+
+        FAILED
+
+    Alle andre statusser ignoreres, eksempelvis:
+
+        RUNNING
+        PENDING
+        NEW
+        CANCELLED
+        STOPPED
+        ERROR
+        NULL
+
+    Bemærk:
+
+        Hvis databasen bruger en anden enum-værdi end FAILED
+        for fejlede sessions, skal værdien tilføjes eksplicit.
+
 
     TIDSMODEL
     =========
 
-    session.updated_at er gemt som dansk lokalt klokkeslæt
-    uden tidszoneinformation.
+    session.updated_at har PostgreSQL-typen:
+
+        timestamp without time zone
+
+    Værdierne er gemt som dansk lokalt klokkeslæt.
 
     Eksempel:
 
         2026-09-01 06:25:00
 
-    Værdien skal forstås som:
+    Værdien skal fortolkes som:
 
         06:25 dansk tid
 
     report_now kommer fra:
 
-        clock_timestamp()
+        SELECT clock_timestamp();
 
-    og er et entydigt timestamp with time zone.
+    report_now er et entydigt tidspunkt med tidszone.
 
-    Eksempel om sommeren:
-
-        Rapport køres 07:00 dansk tid
-        report_now = 05:00 UTC
-
-        Session opdateret 06:25 dansk tid
-        updated_at_utc = 04:25 UTC
-
-        04:25 UTC <= 05:00 UTC
-
-    Sessionen kommer derfor korrekt med.
-
-    SQL konverterer session.updated_at sådan:
+    Derfor konverteres session.updated_at sådan:
 
         s.updated_at
         AT TIME ZONE 'Europe/Copenhagen'
 
-    Dette håndterer automatisk:
+    Eksempel i dansk sommertid:
+
+        Gemte updated_at:
+            2026-09-01 06:25:00
+
+        Fortolket som dansk tid:
+            2026-09-01 06:25:00+02:00
+
+        Samme tidspunkt i UTC:
+            2026-09-01 04:25:00+00:00
+
+    Konverteringen tager automatisk højde for:
 
         dansk sommertid
         dansk vintertid
+
 
     TIDSVINDUER
     ===========
@@ -231,8 +279,16 @@ def fetch_session_counts(report_now):
         30 dage
         40 dage
 
-    En session fra de seneste 12 timer tæller derfor også med
-    i alle de længere vinduer.
+    En session fra de seneste 12 timer kan derfor tælle med i:
+
+        S 24
+        S 48
+        S 72
+        S 7 d
+        S 14 d
+        S 30 d
+        S 40 d
+
 
     Input:
         report_now:
@@ -243,25 +299,32 @@ def fetch_session_counts(report_now):
 
                 SELECT clock_timestamp();
 
+
     Output:
         dict:
 
         {
             process_id: {
-                "completed_24h": 4,
-                "total_24h": 5,
-                "completed_48h": 8,
-                "total_48h": 10,
-                "completed_72h": 10,
-                "total_72h": 13,
-                "completed_7d": 20,
-                "total_7d": 24,
-                "completed_14d": 40,
-                "total_14d": 45,
-                "completed_30d": 80,
-                "total_30d": 90,
-                "completed_40d": 100,
-                "total_40d": 112,
+                "completed_24h": 2,
+                "total_24h": 2,
+
+                "completed_48h": 3,
+                "total_48h": 4,
+
+                "completed_72h": 6,
+                "total_72h": 7,
+
+                "completed_7d": 14,
+                "total_7d": 15,
+
+                "completed_14d": 33,
+                "total_14d": 34,
+
+                "completed_30d": 82,
+                "total_30d": 102,
+
+                "completed_40d": 109,
+                "total_40d": 129,
             }
         }
     """
@@ -279,12 +342,6 @@ def fetch_session_counts(report_now):
                     -- -----------------------------------------
                     -- DANSK LOKALTID TIL ENTYDIGT TIDSPUNKT
                     -- -----------------------------------------
-                    --
-                    -- s.updated_at er timestamp without time zone
-                    -- og indeholder dansk lokalt klokkeslæt.
-                    --
-                    -- Resultatet bliver timestamp with time zone,
-                    -- som kan sammenlignes korrekt med report_now.
                     (
                         s.updated_at
                         AT TIME ZONE 'Europe/Copenhagen'
@@ -294,8 +351,15 @@ def fetch_session_counts(report_now):
                     -- NORMALISER SESSIONSTATUS
                     -- -----------------------------------------
                     --
-                    -- status er en PostgreSQL enum.
-                    -- Derfor konverteres den først til tekst.
+                    -- Sessionstatus er en PostgreSQL enum.
+                    -- Derfor konverteres status først til tekst.
+                    --
+                    -- Eksempler:
+                    --
+                    --     Completed   -> COMPLETED
+                    --     completed   -> COMPLETED
+                    --     In progress -> IN_PROGRESS
+                    --     In-progress -> IN_PROGRESS
                     UPPER(
                         REPLACE(
                             REPLACE(
@@ -314,8 +378,9 @@ def fetch_session_counts(report_now):
                 FROM "session" s
 
                 WHERE
-                    -- Begræns datamængden til rapportens
-                    -- maksimale historik på 40 dage.
+                    -- -----------------------------------------
+                    -- MAKSIMAL RAPPORTPERIODE: 40 DAGE
+                    -- -----------------------------------------
                     (
                         s.updated_at
                         AT TIME ZONE 'Europe/Copenhagen'
@@ -341,6 +406,8 @@ def fetch_session_counts(report_now):
                 -- =============================================
                 -- SENESTE 24 TIMER
                 -- =============================================
+
+                -- Tæller kun COMPLETED.
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
@@ -351,17 +418,24 @@ def fetch_session_counts(report_now):
                         AND normalized_status = 'COMPLETED'
                 ) AS completed_24h,
 
+                -- Total er kun COMPLETED + FAILED.
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
                             %(report_now)s
                             - INTERVAL '24 hours'
                         )
+
+                        AND normalized_status IN (
+                            'COMPLETED',
+                            'FAILED'
+                        )
                 ) AS total_24h,
 
                 -- =============================================
                 -- SENESTE 48 TIMER
                 -- =============================================
+
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
@@ -378,11 +452,17 @@ def fetch_session_counts(report_now):
                             %(report_now)s
                             - INTERVAL '48 hours'
                         )
+
+                        AND normalized_status IN (
+                            'COMPLETED',
+                            'FAILED'
+                        )
                 ) AS total_48h,
 
                 -- =============================================
                 -- SENESTE 72 TIMER
                 -- =============================================
+
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
@@ -399,11 +479,17 @@ def fetch_session_counts(report_now):
                             %(report_now)s
                             - INTERVAL '72 hours'
                         )
+
+                        AND normalized_status IN (
+                            'COMPLETED',
+                            'FAILED'
+                        )
                 ) AS total_72h,
 
                 -- =============================================
                 -- SENESTE 7 DAGE
                 -- =============================================
+
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
@@ -420,11 +506,17 @@ def fetch_session_counts(report_now):
                             %(report_now)s
                             - INTERVAL '7 days'
                         )
+
+                        AND normalized_status IN (
+                            'COMPLETED',
+                            'FAILED'
+                        )
                 ) AS total_7d,
 
                 -- =============================================
                 -- SENESTE 14 DAGE
                 -- =============================================
+
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
@@ -441,11 +533,17 @@ def fetch_session_counts(report_now):
                             %(report_now)s
                             - INTERVAL '14 days'
                         )
+
+                        AND normalized_status IN (
+                            'COMPLETED',
+                            'FAILED'
+                        )
                 ) AS total_14d,
 
                 -- =============================================
                 -- SENESTE 30 DAGE
                 -- =============================================
+
                 COUNT(*) FILTER (
                     WHERE
                         updated_at_utc > (
@@ -462,19 +560,29 @@ def fetch_session_counts(report_now):
                             %(report_now)s
                             - INTERVAL '30 days'
                         )
+
+                        AND normalized_status IN (
+                            'COMPLETED',
+                            'FAILED'
+                        )
                 ) AS total_30d,
 
                 -- =============================================
                 -- SENESTE 40 DAGE
                 -- =============================================
-                --
-                -- CTE'en indeholder allerede kun de seneste
-                -- 40 dage. Derfor kræves intet ekstra datofilter.
+
+                -- CTE'en er allerede begrænset til 40 dage.
                 COUNT(*) FILTER (
                     WHERE normalized_status = 'COMPLETED'
                 ) AS completed_40d,
 
-                COUNT(*) AS total_40d
+                -- Total er fortsat kun COMPLETED + FAILED.
+                COUNT(*) FILTER (
+                    WHERE normalized_status IN (
+                        'COMPLETED',
+                        'FAILED'
+                    )
+                ) AS total_40d
 
             FROM normalized_sessions
 
