@@ -187,6 +187,9 @@ from report_test1 import (
     REPORT as TEST1,
 )
 
+from report_lukning_af_personalesager import (
+    REPORT as LUKNING_AF_PERSONALESAGER,
+)
 
 # -------------------------------------------------------------
 # AKTIVE RAPPORTER
@@ -199,6 +202,7 @@ from report_test1 import (
 REPORTS = [
     TEST1,
     FOREBYGGENDE_HJEMMEBESOEG,
+    LUKNING_AF_PERSONALESAGER,
 ]
 
 
