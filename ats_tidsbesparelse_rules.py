@@ -19,7 +19,6 @@ from ats_tidsbesparelse_models import (
 REQUIRED_COLUMNS = (
     "Aktiv",
     "Queue-navn",
-    "Sharepoint navn",
     "Resultat",
     "States",
     "Matchtype",
@@ -389,9 +388,6 @@ def _build_rule(
     return AtsRule(
         row_number=row_number,
         queue_name=queue_name,
-        sharepoint_name=_as_text(
-            values["Sharepoint navn"]
-        ),
         result=result,
         stats=stats,
         match_type=match_type,
