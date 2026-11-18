@@ -4,6 +4,8 @@ import asyncio
 import logging
 import sys
 
+from ats_tidsbesparelse_report import run_ats_tidsbesparelse_report
+
 from automation_server_client import (
     AutomationServer,
     WorkItemError,
@@ -51,6 +53,8 @@ from sharepoint_report_config_repository import (
 DEBUG = "--debug" in sys.argv
 QUEUE_MODE = "--queue" in sys.argv
 ATS_DRIFT_MODE = "--ats-drift" in sys.argv
+ATS_TIDSBESPARELSE_MODE = "--ats-tidsbesparelse" in sys.argv
+ATS_TIDSBESPARELSE_LOCAL_MODE = "--ats-tidsbesparelse-local" in sys.argv
 
 # ------------------------------------------------------------
 # LOGGING
@@ -546,34 +550,116 @@ if __name__ == "__main__":
     # --------------------------------------------------------
     # VALIDER KOMBINEREDE MODES
     # --------------------------------------------------------
-    if ATS_DRIFT_MODE and QUEUE_MODE:
+    #
+    # Følgende specialfunktioner må ikke køres samtidig:
+    #
+    #     --ats-drift
+    #     --ats-tidsbesparelse
+    #     --ats-tidsbesparelse-local
+    #
+    # Specialfunktionerne må heller ikke kombineres med
+    # --queue.
+    #
+    selected_special_modes = sum(
+        (
+            ATS_DRIFT_MODE,
+            ATS_TIDSBESPARELSE_MODE,
+            ATS_TIDSBESPARELSE_LOCAL_MODE,
+        )
+    )
+
+    if (
+        selected_special_modes > 1
+        or (
+            QUEUE_MODE
+            and selected_special_modes > 0
+        )
+    ):
         raise ValueError(
-            "--ats-drift og --queue må ikke bruges sammen"
+            "--queue og specialrapport-flags må ikke "
+            "bruges sammen. Vælg kun én af: "
+            "--queue, --ats-drift, "
+            "--ats-tidsbesparelse eller "
+            "--ats-tidsbesparelse-local."
         )
 
+    # --------------------------------------------------------
+    # PROGRAMSTART
+    # --------------------------------------------------------
     log_info(
         logger,
         (
-            f"PROGRAM START | "
+            "PROGRAM START | "
             f"DEBUG={DEBUG} | "
             f"QUEUE_MODE={QUEUE_MODE} | "
-            f"ATS_DRIFT_MODE={ATS_DRIFT_MODE}"
+            f"ATS_DRIFT_MODE={ATS_DRIFT_MODE} | "
+            "ATS_TIDSBESPARELSE_MODE="
+            f"{ATS_TIDSBESPARELSE_MODE} | "
+            "ATS_TIDSBESPARELSE_LOCAL_MODE="
+            f"{ATS_TIDSBESPARELSE_LOCAL_MODE}"
         ),
     )
 
-    ats = AutomationServer.from_environment()
+    # --------------------------------------------------------
+    # ATS-TIDSBESPARELSE, LOKAL UDEN MAIL
+    # --------------------------------------------------------
+    #
+    # Denne mode:
+    #
+    #     henter regler fra SharePoint
+    #     henter completed workitems
+    #     opretter Excel-filen
+    #     sender ikke mail
+    #
+    # Automation Server-klienten oprettes ikke, fordi
+    # tidsbesparelsesrapporten læser direkte fra databasen.
+    #
+    if ATS_TIDSBESPARELSE_LOCAL_MODE:
+        result = run_ats_tidsbesparelse_report(
+            send_email=False,
+        )
+
+        log_info(
+            logger,
+            (
+                "ATS TIDSBESPARELSE LOKAL RESULTAT | "
+                f"{result}"
+            ),
+        )
+
+        sys.exit(0)
+
+    # --------------------------------------------------------
+    # ATS-TIDSBESPARELSE MED MAIL
+    # --------------------------------------------------------
+    #
+    # Denne mode:
+    #
+    #     henter regler fra SharePoint
+    #     henter completed workitems
+    #     opretter Excel-filen
+    #     sender rapporten med mail
+    #
+    if ATS_TIDSBESPARELSE_MODE:
+        result = run_ats_tidsbesparelse_report(
+            send_email=True,
+        )
+
+        log_info(
+            logger,
+            (
+                "ATS TIDSBESPARELSE RESULTAT | "
+                f"{result}"
+            ),
+        )
+
+        sys.exit(0)
 
     # --------------------------------------------------------
     # ATS-DRIFTSRAPPORT
     # --------------------------------------------------------
     #
     # Denne mode bruger ikke rapportering-workqueue.
-    #
-    # Den:
-    #     henter data
-    #     opretter Excel
-    #     sender mail
-    #     afslutter processen
     #
     if ATS_DRIFT_MODE:
         result = run_ats_drift_report()
@@ -591,13 +677,25 @@ if __name__ == "__main__":
     # --------------------------------------------------------
     # ALMINDELIG RAPPORTERING
     # --------------------------------------------------------
+    #
+    # Først her oprettes forbindelsen til Automation Server.
+    #
+    # Det sker kun, hvis programmet ikke allerede er afsluttet
+    # efter en af specialrapporterne ovenfor.
+    #
     validate_reports_config()
+
+    ats = AutomationServer.from_environment()
 
     workqueue = ats.workqueue()
 
     # --------------------------------------------------------
     # QUEUE-MODE
     # --------------------------------------------------------
+    #
+    # Produceren kontrollerer rapportdefinitionerne og
+    # opretter nye rapporterings-items.
+    #
     if QUEUE_MODE:
         asyncio.run(
             populate_queue(
@@ -605,11 +703,16 @@ if __name__ == "__main__":
                 debug=DEBUG,
             )
         )
+
         sys.exit(0)
 
     # --------------------------------------------------------
     # PROCESS-MODE
     # --------------------------------------------------------
+    #
+    # Uden --queue eller et specialflag behandles de
+    # eksisterende items i rapporteringskøen.
+    #
     asyncio.run(
         process_workqueue(
             workqueue,
