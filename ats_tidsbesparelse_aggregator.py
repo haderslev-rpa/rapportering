@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from decimal import Decimal
 
@@ -10,20 +11,49 @@ from ats_tidsbesparelse_models import (
 )
 
 
+# Fjerner kun et afsluttende dansk dato- og klokkeslæt.
+#
+# Eksempel:
+#
+#     2.0 Advis færdiggjort 03-08-2026 09:02:05
+#
+# bliver:
+#
+#     2.0 Advis færdiggjort
+#
+TRAILING_TIMESTAMP_PATTERN = re.compile(
+    r"\s+"
+    r"\d{2}-\d{2}-\d{4}"
+    r"\s+"
+    r"\d{2}:\d{2}:\d{2}"
+    r"\s*$"
+)
+
+
 def aggregate_items(
     items: list[ClassifiedItem],
     rules: list[AtsRule],
 ) -> list[Row]:
     """
-    Bygger rapportens opsummerede rækker.
+    Samler workitems efter reglenes Rapportvisning.
 
-    Først:
-        Opretter resultatlinjer for klassificerede
-        og ikke-klassificerede workitems.
+    RESULTAT:
+        Grupperer efter måned, queue og regel.
+        Ingen tags vises.
 
-    Derefter:
-        Opretter højst én FAST_PR_MÅNED-linje for
-        hver queue og måned med completed aktivitet.
+    REGEL_TAGS:
+        Grupperer efter måned, queue og regel.
+        Matchende tags viser Excel-reglens States.
+        Rå tags er tomme.
+
+    RÅ_TAGS:
+        Grupperer efter måned, queue, regel og den
+        normaliserede kombination af rå tags.
+        Både regel-tags og rå tags vises.
+
+    NO_MATCH:
+        Grupperer kun efter måned og queue.
+        Ingen tags vises.
     """
     grouped_items: dict[
         tuple,
@@ -31,18 +61,35 @@ def aggregate_items(
     ] = defaultdict(list)
 
     for item in items:
-        if item.rule is not None:
+        rule = item.rule
+
+        if rule is None:
             group_key = (
                 item.month,
-                item.queue_name,
-                item.rule.technical_id,
-            )
-        else:
-            group_key = (
-                item.month,
-                item.queue_name,
+                item.queue_name.casefold(),
                 "NO_MATCH",
-                item.raw_stats,
+            )
+
+        elif rule.detail_level == "RÅ_TAGS":
+            normalized_raw_stats = (
+                _normalize_raw_stats(
+                    item.raw_stats
+                )
+            )
+
+            group_key = (
+                item.month,
+                item.queue_name.casefold(),
+                rule.technical_id,
+                normalized_raw_stats,
+            )
+
+        else:
+            # RESULTAT og REGEL_TAGS samles på reglen.
+            group_key = (
+                item.month,
+                item.queue_name.casefold(),
+                rule.technical_id,
             )
 
         grouped_items[
@@ -53,10 +100,12 @@ def aggregate_items(
 
     rows: list[Row] = []
 
-    for group in grouped_items.values():
+    for grouped_items_for_row in (
+        grouped_items.values()
+    ):
         rows.append(
-            _create_item_group_row(
-                group
+            _create_item_row(
+                grouped_items_for_row
             )
         )
 
@@ -74,16 +123,16 @@ def aggregate_items(
             row["Queue Name"].casefold(),
             row["Resultat"].casefold(),
             row["Matchregel-ID"],
+            row["Rå tags"],
         ),
     )
 
 
-def _create_item_group_row(
+def _create_item_row(
     grouped_items: list[ClassifiedItem],
 ) -> Row:
     """
-    Opretter én opsummeret række for en gruppe
-    klassificerede workitems eller NO_MATCH-items.
+    Opretter én opsummeret rapportlinje.
     """
     first_item = grouped_items[0]
     rule = first_item.rule
@@ -91,13 +140,9 @@ def _create_item_group_row(
         grouped_items
     )
 
-    raw_stats = _join_unique(
-        value
-        for item in grouped_items
-        for value in item.raw_stats
-    )
-
     if rule is None:
+        # NO_MATCH har ingen Excel-regel, som udtrykkeligt
+        # tillader visning af rå data.
         return _create_row(
             month=first_item.month,
             queue_name=first_item.queue_name,
@@ -105,19 +150,48 @@ def _create_item_group_row(
             rule_id="INGEN_MATCH",
             match_type="NO_MATCH",
             matching_stats="",
-            raw_stats=raw_stats,
+            raw_stats="",
             item_count=item_count,
             minutes_per_item=Decimal("0"),
             fixed_minutes_per_month=Decimal("0"),
             saved_minutes=Decimal("0"),
-            detail_level="SUM_RESULTAT",
+            report_view="RESULTAT",
         )
 
-    matching_stats = _join_unique(
-        value
-        for item in grouped_items
-        for value in item.matched_stats
-    )
+    if rule.detail_level == "RESULTAT":
+        matching_stats = ""
+        raw_stats = ""
+
+    elif rule.detail_level == "REGEL_TAGS":
+        matching_stats = _join_unique(
+            configured_stat
+            for item in grouped_items
+            for configured_stat
+            in item.matched_stats
+        )
+        raw_stats = ""
+
+    elif rule.detail_level == "RÅ_TAGS":
+        matching_stats = _join_unique(
+            configured_stat
+            for item in grouped_items
+            for configured_stat
+            in item.matched_stats
+        )
+
+        raw_stats = _join_unique(
+            raw_stat
+            for item in grouped_items
+            for raw_stat in _normalize_raw_stats(
+                item.raw_stats
+            )
+        )
+
+    else:
+        raise ValueError(
+            "Ukendt Rapportvisning i klassificeret "
+            f"regel: {rule.detail_level!r}"
+        )
 
     saved_minutes = (
         rule.minutes_per_item
@@ -127,7 +201,10 @@ def _create_item_group_row(
     return _create_row(
         month=first_item.month,
         queue_name=first_item.queue_name,
-        result=rule.result,
+        result=(
+            rule.result
+            or "Resultat"
+        ),
         rule_id=rule.technical_id,
         match_type=rule.match_type,
         matching_stats=matching_stats,
@@ -138,7 +215,7 @@ def _create_item_group_row(
         ),
         fixed_minutes_per_month=Decimal("0"),
         saved_minutes=saved_minutes,
-        detail_level=rule.detail_level,
+        report_view=rule.detail_level,
     )
 
 
@@ -148,12 +225,8 @@ def _create_fixed_month_rows(
     rules: list[AtsRule],
 ) -> list[Row]:
     """
-    Opretter én fast besparelseslinje pr.:
-
-        Queue-navn + måned
-
-    Linjen oprettes kun, hvis queuen har mindst ét
-    completed workitem i den pågældende måned.
+    Opretter højst én FAST_PR_MÅNED-række pr.
+    queue og måned med completed aktivitet.
     """
     active_queue_months = {
         (
@@ -195,30 +268,29 @@ def _create_fixed_month_rows(
             value[1].casefold(),
         ),
     ):
-        completed_date = month
-
-        applicable_fixed_rules = [
+        applicable_rules = [
             rule
-            for rule in fixed_rules_by_queue.get(
+            for rule
+            in fixed_rules_by_queue.get(
                 queue_key,
                 [],
             )
             if (
                 rule.valid_from
-                <= completed_date
+                <= month
                 < rule.valid_to
             )
         ]
 
-        if not applicable_fixed_rules:
+        if not applicable_rules:
             continue
 
         if len(
-            applicable_fixed_rules
+            applicable_rules
         ) > 1:
-            matching_rows = [
+            excel_rows = [
                 rule.row_number
-                for rule in applicable_fixed_rules
+                for rule in applicable_rules
             ]
 
             raise RuntimeError(
@@ -226,24 +298,21 @@ def _create_fixed_month_rows(
                 "FAST_PR_MÅNED-regler for "
                 f"queue {queue_name!r} og "
                 f"måned {month:%d-%m-%Y}. "
-                "Excel-rækker: "
-                f"{matching_rows}"
+                f"Excel-rækker: {excel_rows}"
             )
 
         fixed_rule = (
-            applicable_fixed_rules[0]
-        )
-
-        result = (
-            fixed_rule.result
-            or "Fast månedsbesparelse"
+            applicable_rules[0]
         )
 
         fixed_rows.append(
             _create_row(
                 month=month,
                 queue_name=queue_name,
-                result=result,
+                result=(
+                    fixed_rule.result
+                    or "Fast månedsbesparelse"
+                ),
                 rule_id=(
                     fixed_rule.technical_id
                 ),
@@ -260,13 +329,63 @@ def _create_fixed_month_rows(
                     fixed_rule
                     .fixed_minutes_per_month
                 ),
-                detail_level=(
+                report_view=(
                     fixed_rule.detail_level
                 ),
             )
         )
 
     return fixed_rows
+
+
+def _normalize_raw_stats(
+    raw_stats: tuple[str, ...],
+) -> tuple[str, ...]:
+    """
+    Normaliserer rå tags før visning og gruppering.
+
+    Funktionen:
+        fjerner mellemrum før og efter teksten
+        fjerner afsluttende dato og klokkeslæt
+        fjerner dubletter
+        sorterer værdierne stabilt
+
+    Funktionen forsøger ikke at fjerne CPR, navne eller
+    andre personoplysninger. Derfor må outputtet kun bruges,
+    når Rapportvisning udtrykkeligt er RÅ_TAGS.
+    """
+    normalized_values = []
+
+    for raw_stat in raw_stats:
+        text = str(
+            raw_stat
+            or ""
+        ).strip()
+
+        if not text:
+            continue
+
+        text = TRAILING_TIMESTAMP_PATTERN.sub(
+            "",
+            text,
+        ).strip()
+
+        if text:
+            normalized_values.append(
+                text
+            )
+
+    unique_values = {
+        value
+        for value in normalized_values
+    }
+
+    return tuple(
+        sorted(
+            unique_values,
+            key=str.casefold,
+        )
+    )
 
 
 def _create_row(
@@ -282,15 +401,19 @@ def _create_row(
     minutes_per_item: Decimal,
     fixed_minutes_per_month: Decimal,
     saved_minutes: Decimal,
-    detail_level: str,
+    report_view: str,
 ) -> Row:
     """
-    Opretter én række med de 17 aftalte kolonner.
+    Opretter én række med rapportens 17 kolonner.
+
+    Outputkolonnen hedder fortsat Detailniveau, så rækken kan
+    kopieres til den eksisterende fælles tabel. Værdien er den
+    valgte Rapportvisning fra Excel-reglen.
     """
     return {
         "Er sumlinje": "Ja",
         "Rækketype": "Sum",
-        "Detailniveau": detail_level,
+        "Detailniveau": report_view,
         "Datoperspektiv": "Completed",
         "Måned": month,
         "Queue Name": queue_name,

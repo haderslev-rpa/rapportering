@@ -11,7 +11,9 @@ from openpyxl.utils.cell import range_boundaries
 from ats_tidsbesparelse_config import (
     ATS_TIDSBESPARELSE_CONFIG,
 )
-from ats_tidsbesparelse_models import AtsRule
+from ats_tidsbesparelse_models import (
+    AtsRule,
+)
 
 
 REQUIRED_COLUMNS = (
@@ -25,7 +27,7 @@ REQUIRED_COLUMNS = (
     "Prioritet",
     "Beregningsmetode",
     "Faste minutter pr. måned",
-    "Detailniveau",
+    "Rapportvisning",
     "Gyldig fra",
     "Gyldig til",
 )
@@ -48,6 +50,12 @@ CALCULATION_METHODS = {
     "FAST_PR_MÅNED",
 }
 
+REPORT_VIEWS = {
+    "RESULTAT",
+    "REGEL_TAGS",
+    "RÅ_TAGS",
+}
+
 
 def read_rules(
     file_bytes: bytes,
@@ -55,23 +63,9 @@ def read_rules(
     """
     Læser og validerer aktive regler fra ATS_ReglerTable.
 
-    Output:
-        En sorteret liste med AtsRule-objekter.
-
-    Regler:
-        PR_ITEM:
-            - Minutter pr. item må være 0 eller større.
-            - Faste minutter pr. måned skal være 0.
-            - Resultat skal være udfyldt.
-
-        FAST_PR_MÅNED:
-            - Minutter pr. item skal være 0.
-            - Faste minutter pr. måned skal være større end 0.
-            - States skal være tom.
-            - Matchtype skal være NO_STATE_FILTER.
-
-        Der må kun findes én aktiv FAST_PR_MÅNED-regel
-        pr. queue i en given gyldighedsperiode.
+    Excel-kolonnen Rapportvisning gemmes fortsat i modellens
+    detail_level-felt. Det bevarer kompatibiliteten med
+    rapportens eksisterende outputkolonne Detailniveau.
     """
     try:
         workbook = load_workbook(
@@ -232,11 +226,26 @@ def _build_rule(
         values["Beregningsmetode"]
     ).upper()
 
-    if calculation_method not in CALCULATION_METHODS:
+    if (
+        calculation_method
+        not in CALCULATION_METHODS
+    ):
         raise ValueError(
             f"Excel-række {row_number}: "
             "Ukendt Beregningsmetode "
             f"{calculation_method!r}."
+        )
+
+    report_view = _as_text(
+        values["Rapportvisning"]
+    ).upper()
+
+    if report_view not in REPORT_VIEWS:
+        raise ValueError(
+            f"Excel-række {row_number}: "
+            f"Ukendt Rapportvisning {report_view!r}. "
+            "Tilladte værdier er RESULTAT, "
+            "REGEL_TAGS og RÅ_TAGS."
         )
 
     stats = tuple(
@@ -267,15 +276,14 @@ def _build_rule(
     if minutes_per_item < 0:
         raise ValueError(
             f"Excel-række {row_number}: "
-            "Minutter pr. item må ikke "
-            "være negativ."
+            "Minutter pr. item må ikke være negativ."
         )
 
     if fixed_minutes_per_month < 0:
         raise ValueError(
             f"Excel-række {row_number}: "
-            "Faste minutter pr. måned må "
-            "ikke være negativ."
+            "Faste minutter pr. måned må ikke "
+            "være negativ."
         )
 
     if (
@@ -286,112 +294,8 @@ def _build_rule(
             f"Excel-række {row_number}: "
             "Rækken har både Minutter pr. item "
             "og Faste minutter pr. måned. "
-            "Kun ét af felterne må have en "
-            "værdi over 0."
-        )
-
-    if calculation_method == "PR_ITEM":
-        _validate_per_item_rule(
-            row_number=row_number,
-            result=result,
-            stats=stats,
-            match_type=match_type,
-            fixed_minutes_per_month=(
-                fixed_minutes_per_month
-            ),
-        )
-
-    if calculation_method == "FAST_PR_MÅNED":
-        _validate_fixed_month_rule(
-            row_number=row_number,
-            stats=stats,
-            match_type=match_type,
-            minutes_per_item=(
-                minutes_per_item
-            ),
-            fixed_minutes_per_month=(
-                fixed_minutes_per_month
-            ),
-        )
-
-    valid_from = _as_date(
-        value=values["Gyldig fra"],
-        row_number=row_number,
-        field_name="Gyldig fra",
-    )
-
-    valid_to = _as_date(
-        value=values["Gyldig til"],
-        row_number=row_number,
-        field_name="Gyldig til",
-    )
-
-    if valid_from >= valid_to:
-        raise ValueError(
-            f"Excel-række {row_number}: "
-            "Gyldig fra skal ligge før "
-            "Gyldig til."
-        )
-
-    priority = _as_integer(
-        value=values["Prioritet"],
-        row_number=row_number,
-    )
-
-    detail_level = (
-        _as_text(
-            values["Detailniveau"]
-        )
-        or "SUM_RESULTAT"
-    )
-
-    return AtsRule(
-        row_number=row_number,
-        queue_name=queue_name,
-        sharepoint_name=_as_text(
-            values["Sharepoint navn"]
-        ),
-        result=result,
-        stats=stats,
-        match_type=match_type,
-        minutes_per_item=minutes_per_item,
-        priority=priority,
-        calculation_method=calculation_method,
-        fixed_minutes_per_month=(
-            fixed_minutes_per_month
-        ),
-        detail_level=detail_level,
-        valid_from=valid_from,
-        valid_to=valid_to,
-    )
-
-
-def _validate_per_item_rule(
-    *,
-    row_number: int,
-    result: str,
-    stats: tuple[str, ...],
-    match_type: str,
-    fixed_minutes_per_month: Decimal,
-) -> None:
-    """
-    Validerer en PR_ITEM-regel.
-
-    Minutter pr. item må gerne være 0.
-    Det gør det muligt at tælle enheder uden
-    at tilskrive dem en tidsbesparelse.
-    """
-    if fixed_minutes_per_month != 0:
-        raise ValueError(
-            f"Excel-række {row_number}: "
-            "PR_ITEM må ikke have Faste "
-            "minutter pr. måned."
-        )
-
-    if not result:
-        raise ValueError(
-            f"Excel-række {row_number}: "
-            "PR_ITEM kræver et Resultat."
+            "Kun ét af felterne må have en værdi "
+            "over 0."
         )
 
     if (
@@ -410,58 +314,110 @@ def _validate_per_item_rule(
     ):
         raise ValueError(
             f"Excel-række {row_number}: "
-            "NO_STATE_FILTER må ikke have "
-            "værdier i States."
+            "NO_STATE_FILTER må ikke have States."
         )
 
+    if calculation_method == "PR_ITEM":
+        if not result:
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "PR_ITEM kræver et Resultat."
+            )
 
-def _validate_fixed_month_rule(
-    *,
-    row_number: int,
-    stats: tuple[str, ...],
-    match_type: str,
-    minutes_per_item: Decimal,
-    fixed_minutes_per_month: Decimal,
-) -> None:
-    """
-    Validerer én FAST_PR_MÅNED-regel.
-    """
-    if minutes_per_item != 0:
+        if fixed_minutes_per_month != 0:
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "PR_ITEM må ikke have Faste "
+                "minutter pr. måned."
+            )
+
+    if calculation_method == "FAST_PR_MÅNED":
+        if minutes_per_item != 0:
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "FAST_PR_MÅNED må ikke have "
+                "Minutter pr. item."
+            )
+
+        if fixed_minutes_per_month <= 0:
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "FAST_PR_MÅNED kræver Faste "
+                "minutter pr. måned over 0."
+            )
+
+        if stats:
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "FAST_PR_MÅNED må ikke have States."
+            )
+
+        if match_type != "NO_STATE_FILTER":
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "FAST_PR_MÅNED skal have "
+                "Matchtype NO_STATE_FILTER."
+            )
+
+        if report_view == "RÅ_TAGS":
+            raise ValueError(
+                f"Excel-række {row_number}: "
+                "FAST_PR_MÅNED kan ikke bruge "
+                "Rapportvisning RÅ_TAGS, fordi "
+                "månedsrækker ikke klassificerer "
+                "enkelte workitems."
+            )
+
+    valid_from = _as_date(
+        value=values["Gyldig fra"],
+        row_number=row_number,
+        field_name="Gyldig fra",
+    )
+
+    valid_to = _as_date(
+        value=values["Gyldig til"],
+        row_number=row_number,
+        field_name="Gyldig til",
+    )
+
+    if valid_from >= valid_to:
         raise ValueError(
             f"Excel-række {row_number}: "
-            "FAST_PR_MÅNED må ikke have "
-            "Minutter pr. item."
+            "Gyldig fra skal ligge før Gyldig til."
         )
 
-    if fixed_minutes_per_month <= 0:
-        raise ValueError(
-            f"Excel-række {row_number}: "
-            "FAST_PR_MÅNED kræver Faste "
-            "minutter pr. måned over 0."
-        )
-
-    if stats:
-        raise ValueError(
-            f"Excel-række {row_number}: "
-            "FAST_PR_MÅNED må ikke have "
-            "værdier i States."
-        )
-
-    if match_type != "NO_STATE_FILTER":
-        raise ValueError(
-            f"Excel-række {row_number}: "
-            "FAST_PR_MÅNED skal have "
-            "Matchtype NO_STATE_FILTER."
-        )
+    return AtsRule(
+        row_number=row_number,
+        queue_name=queue_name,
+        sharepoint_name=_as_text(
+            values["Sharepoint navn"]
+        ),
+        result=result,
+        stats=stats,
+        match_type=match_type,
+        minutes_per_item=minutes_per_item,
+        priority=_as_integer(
+            value=values["Prioritet"],
+            row_number=row_number,
+        ),
+        calculation_method=calculation_method,
+        fixed_minutes_per_month=(
+            fixed_minutes_per_month
+        ),
+        # Feltet hedder detail_level i datamodellen,
+        # men indeholder Excel-kolonnen Rapportvisning.
+        detail_level=report_view,
+        valid_from=valid_from,
+        valid_to=valid_to,
+    )
 
 
 def _validate_fixed_month_rules(
     rules: list[AtsRule],
 ) -> None:
     """
-    Kontrollerer, at samme queue ikke har to
-    aktive FAST_PR_MÅNED-regler med
-    overlappende gyldighed.
+    Tillader højst én FAST_PR_MÅNED-regel pr. queue
+    i en given gyldighedsperiode.
     """
     rules_by_queue: dict[
         str,
@@ -479,22 +435,11 @@ def _validate_fixed_month_rules(
                 rule
             )
 
-    for queue_rules in (
-        rules_by_queue.values()
-    ):
-        sorted_rules = sorted(
-            queue_rules,
-            key=lambda rule: (
-                rule.valid_from,
-                rule.valid_to,
-                rule.row_number,
-            ),
-        )
-
+    for queue_rules in rules_by_queue.values():
         for rule_index, left_rule in enumerate(
-            sorted_rules
+            queue_rules
         ):
-            for right_rule in sorted_rules[
+            for right_rule in queue_rules[
                 rule_index + 1:
             ]:
                 periods_overlap = (
