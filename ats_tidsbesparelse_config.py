@@ -5,7 +5,7 @@ ATS_TIDSBESPARELSE_CONFIG = {
     "file_path": "Statistik/Statistk - Regelmotor og data.xlsx",
     "sheet_name": "ATS_Regler",
     "table_name": "ATS_ReglerTable",
-    "months_back": 3,
+    "months_back": 100,
     "output_folder": "tests_local",
     "excel_file_prefix": "ATS_tidsbesparelse",
     "sender_mail": "robot-data@haderslev.dk",
