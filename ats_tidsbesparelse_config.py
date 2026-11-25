@@ -2,7 +2,7 @@ from __future__ import annotations
 
 ATS_TIDSBESPARELSE_CONFIG = {
     "site_name": "Automatisering",
-    "file_path": "Statistik/Statistik - Regelmoter og data.xlsx",
+    "file_path": "Statistik/Statistk - Regelmotor og data.xlsx",
     "sheet_name": "ATS_Regler",
     "table_name": "ATS_ReglerTable",
     "months_back": 3,
